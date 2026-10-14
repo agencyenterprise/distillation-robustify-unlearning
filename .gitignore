@@ -177,3 +177,6 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# AGI-2569 analysis outputs
+analysis/agi2569/out
