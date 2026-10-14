@@ -16,7 +16,9 @@ from transformers import (
 import wandb
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils.loss_functions import forward_kl_loss_fn, print_acc, custom_makedirs
+from utils.loss_functions import (
+    print_acc, custom_makedirs, per_token_forward_kl, per_token_cross_entropy, masked_mean, sample_random_targets,
+)
 from utils.validation_functions import evaluate_kd_ce_ppl
 from utils.process_datasets import make_sequence_length
 
@@ -63,12 +65,34 @@ def partial_distill(
     noise_alpha=0.0,
     noise_beta=0.0,
     shrink_perturb_repeat=False,  
+
+    loss_type="kl",
+    domain_names=None,
+    random_target_domain=None,
+    random_target_counts_path=None,
 ):
     """
     Distillation script using Accelerate. Replaces standard CE with forward KL (KL(teacher||student)).
     We'll merge eng_train_file and kor_train_file if both are provided, else use whichever is non-empty.
     We do final validation after the loop.
+
+    Added for AGI-2569 (defaults reproduce upstream):
+      loss_type                 "kl": forward KL to the teacher on every row (upstream).
+                                "ce": cross-entropy on targets; the teacher is only evaluated once,
+                                as the reference for stop_cond_fn, and never run during training.
+      domain_names              one name per train file (e.g. ["eng", "kor"]); each row is tagged with
+                                its file so the loss can be logged per domain.
+      random_target_domain      "ce" only: rows from this domain get i.i.d. random target tokens instead
+                                of their real next tokens (inputs stay real).
+      random_target_counts_path token counts (torch.save'd 1-D tensor) to sample random targets from;
+                                None samples uniformly over the vocabulary.
     """
+    assert loss_type in ("kl", "ce"), loss_type
+    assert random_target_domain is None or loss_type == "ce", "random targets need loss_type='ce'"
+    if domain_names is None:
+        domain_names = [f"file{i}" for i in range(len(train_files))]
+    assert len(domain_names) == len(train_files)
+    assert random_target_domain is None or random_target_domain in domain_names
 
     # ------------------------------------------------------------
     # Accelerator, logging, seeding
@@ -146,6 +170,8 @@ def partial_distill(
     # ------------------------------------------------------------
     train_ds_list, message = make_sequence_length(train_ds_list=train_ds_list, tokenizer=tokenizer, max_length=max_length, join_or_subsequence=join_or_subsequence)
     print_acc(message, print_message)
+    # Tag each row with its source file, so the loop can pick targets and log loss per domain.
+    train_ds_list = [ds.add_column("domain", [i] * len(ds)) for i, ds in enumerate(train_ds_list)]
 
 
 
@@ -239,10 +265,21 @@ def partial_distill(
     # ------------------------------------------------------------
     # Distillation Loop
     # ------------------------------------------------------------
-    print_acc("[serum_original.py] Starting distillation ...", print_message)
+    print_acc(f"[serum_original.py] Starting distillation ... (loss_type={loss_type}, domains={domain_names}, random_target_domain={random_target_domain})", print_message)
     global_step = 0
     global_tokens = 0
     teacher_model.eval()
+
+    num_domains = len(domain_names)
+    domain_loss_sum = torch.zeros(num_domains, device=accelerator.device)   # since the last optimizer step
+    domain_token_count = torch.zeros(num_domains, device=accelerator.device)
+    domain_tokens_seen = torch.zeros(num_domains, dtype=torch.float64)      # cumulative loss positions, all ranks
+    target_generator = None
+    target_probs = None
+    if random_target_counts_path is not None:
+        counts = torch.load(random_target_counts_path).double()
+        target_probs = (counts / counts.sum()).float().to(accelerator.device)
+        print_acc(f"[serum_original.py] Random targets drawn from {random_target_counts_path}", print_message)
 
     stop_early = False
 
@@ -257,23 +294,44 @@ def partial_distill(
         micro_kd_sum = 0.0
 
         for step_in_epoch, batch in enumerate(train_loader):
-            with torch.no_grad():
-                teacher_out = teacher_model(
-                    input_ids=batch["input_ids"],
-                    attention_mask=batch["attention_mask"],
-                    use_cache=False
-                )
             student_out = student_model(
                 input_ids=batch["input_ids"],
                 attention_mask=batch["attention_mask"],
             )
 
-            kd_loss = forward_kl_loss_fn(
-                teacher_out.logits,
-                student_out.logits,
-                batch["input_ids"],
-                tokenizer.pad_token_id,
-            )
+            if loss_type == "kl":
+                with torch.no_grad():
+                    teacher_out = teacher_model(
+                        input_ids=batch["input_ids"],
+                        attention_mask=batch["attention_mask"],
+                        use_cache=False
+                    )
+                # Same mask and normalisation as upstream's forward_kl_loss_fn.
+                labels = batch["input_ids"][..., 1:]
+                token_mask = (labels != tokenizer.pad_token_id) & (labels != -100)
+                token_loss = per_token_forward_kl(teacher_out.logits, student_out.logits)
+            else:
+                targets = batch["input_ids"]
+                if random_target_domain is not None:
+                    if target_generator is None:
+                        target_generator = torch.Generator(device=targets.device)
+                        target_generator.manual_seed(seed + 1000 * accelerator.process_index)
+                    random_targets = sample_random_targets(
+                        targets.shape, student_out.logits.size(-1), target_generator, targets.device, probs=target_probs
+                    )
+                    is_random_row = (batch["domain"] == domain_names.index(random_target_domain))[:, None]
+                    targets = torch.where(is_random_row, random_targets, targets)
+                # Mask by attention, not by target == pad id: a random target can be token 0.
+                token_mask = batch["attention_mask"][..., 1:].bool()
+                token_loss = per_token_cross_entropy(student_out.logits, targets)
+
+            kd_loss = masked_mean(token_loss, token_mask)
+            with torch.no_grad():
+                row_domain = batch["domain"][:, None].expand_as(token_mask)
+                for d in range(num_domains):
+                    domain_mask = token_mask & (row_domain == d)
+                    domain_loss_sum[d] += (token_loss.detach() * domain_mask).sum()
+                    domain_token_count[d] += domain_mask.sum()
 
             micro_kd_sum += kd_loss.item()
             loss = kd_loss / gradient_accumulation_steps
@@ -292,6 +350,11 @@ def partial_distill(
 
                 avg_kd_loss = micro_kd_sum / float(gradient_accumulation_steps)
                 micro_kd_sum = 0.0
+                # Per-domain mean loss over this optimizer step, pooled across ranks.
+                domain_sums = accelerator.reduce(torch.cat([domain_loss_sum, domain_token_count]), reduction="sum")
+                domain_loss_sum.zero_()
+                domain_token_count.zero_()
+                domain_tokens_seen += domain_sums[num_domains:].double().cpu()
 
                 if global_step == 1 or global_step % 5 == 0:
                     print_acc(
@@ -300,11 +363,16 @@ def partial_distill(
                     )
 
                 train_log_dict = {
-                    "train/kd_loss": avg_kd_loss,
+                    "train/kd_loss" if loss_type == "kl" else "train/ce_loss": avg_kd_loss,
                     "train/step": global_step,
                     "train/tokens_seen": global_tokens,
                     "train/lr": scheduler.get_last_lr()[0],
                 }
+                for d, name in enumerate(domain_names):
+                    count = domain_sums[num_domains + d].item()
+                    if count > 0:
+                        train_log_dict[f"train/loss_{name}"] = domain_sums[d].item() / count
+                    train_log_dict[f"train/loss_tokens_{name}"] = domain_tokens_seen[d].item()
                 if use_wandb and accelerator.is_main_process:
                     wandb.log(train_log_dict)
                 if use_local_record and accelerator.is_main_process:
