@@ -25,6 +25,7 @@ HF_TOKEN_PATH = "tokens/hf_token.txt"
 # Change this to wherever you want to save your smaller model
 NEW_MODEL_DIR = MODEL_DIR + "/random_init_models/gemma-2-"
 REDUCE_TO = "0.1B"
+SEED = 42  # upstream left the random init unseeded
 
 custom_configurations = {
     "0.1B":{
@@ -58,6 +59,10 @@ custom_configurations = {
 }
 
 def main(REDUCE_TO):
+    if os.path.exists(os.path.join(NEW_MODEL_DIR + REDUCE_TO, "config.json")):
+        # Later stages were trained from this init; never silently replace it.
+        print(f"[reduce_gemma_model.py] {NEW_MODEL_DIR + REDUCE_TO} already exists; skipping.")
+        return
     # 1) Optionally log into HF if you have a token
     hf_token = None
     if os.path.isfile(HF_TOKEN_PATH):
@@ -94,7 +99,8 @@ def main(REDUCE_TO):
     # Create a new Gemma2Config from the updated dict
     smaller_config = Gemma2Config(**config_dict)
 
-    print("[reduce_gemma_model.py] Creating a new random-initialized model with smaller config...")
+    print(f"[reduce_gemma_model.py] Creating a new random-initialized model with smaller config (seed {SEED})...")
+    torch.manual_seed(SEED)
     model = AutoModelForCausalLM.from_config(smaller_config)
 
     # 4) Load and adjust tokenizer
@@ -119,5 +125,8 @@ def main(REDUCE_TO):
     print(f"  AutoModelForCausalLM.from_pretrained('{NEW_MODEL_DIR+REDUCE_TO}')")
 
 if __name__ == "__main__":
-    for model_size in ['0.1B', '0.3B', '0.6B', '0.9B']:
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--sizes', nargs='+', default=['0.1B', '0.3B', '0.6B', '0.9B'], choices=list(custom_configurations))
+    for model_size in parser.parse_args().sizes:
         main(model_size)

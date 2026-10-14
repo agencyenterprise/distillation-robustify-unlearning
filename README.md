@@ -48,7 +48,7 @@ This will get you up and running with the core functionality on a single task ty
 6. `python src/prepare_data/prepare.py`
 
 ### 🗣️ Set up only language
-Run all steps above, but before running step 3, open the file `src/prepare_data/download_datasets.py` and comment out all calls to `download_dataset` except those that are indicated as required for language setting in the comments (the final two). This will substantially speed up steps 3 and 6. Skip steps 4 and 5.
+Run all steps above, but run step 2 as `python src/prepare_models/reduce_gemma.py --sizes 0.1B` and step 3 as `python src/prepare_data/download_datasets.py --settings language --max_rows 3000000` (only the two language corpora, and enough rows for 1B tokens each). This will substantially speed up steps 3 and 6. Skip steps 4 and 5.
 
 ### 🔢 Set up only arithmetic
 Run all steps above, but before running step 3, open the file `src/prepare_data/download_datasets.py` and comment out all calls to `download_dataset` except those that are indicated as required for arithmetic setting in the comments (the second to last). This will substantially speed up steps 3 and 6. Skip step 5.

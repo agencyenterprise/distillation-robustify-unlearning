@@ -9,6 +9,8 @@ from transformers import (
     DataCollatorWithPadding
 )
 from torch.utils.data import DataLoader
+import argparse
+import os
 
 # SETUPS_TO_RUN = ["gemma-2-0.9B_eng+kor", "gemma-2-0.9B_eng", "gemma-2-0.6B_eng+kor", "gemma-2-0.6B_eng",]
 SETUPS_TO_RUN = ['gemma-2-0.1B_eng+kor']
@@ -293,8 +295,17 @@ setups = {
 }
 
 if __name__ == "__main__":
-    for setup_id in SETUPS_TO_RUN:
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--setups', nargs='+', default=SETUPS_TO_RUN, choices=list(setups))
+    args = parser.parse_args()
+    for setup_id in args.setups:
         accelerator = Accelerator()
+        if os.path.exists(os.path.join(setups[setup_id]['output_dir'], 'final_model', 'config.json')):
+            print_acc(f"[run_pretrain_language.py] {setup_id} already has a final_model; skipping.", accelerator.is_main_process)
+            continue
+        # A rerun after a crash starts over, so drop the partial record rather than appending to it.
+        if accelerator.is_main_process and os.path.exists(setups[setup_id]['path_local_record']):
+            os.remove(setups[setup_id]['path_local_record'])
 
         english_korean_loss_eval_fn = get_korean_and_english_evalaution_fn(
             model_name          = setups[setup_id]['model_name'], 
@@ -309,7 +320,7 @@ if __name__ == "__main__":
 
         train(
             model_name       = setups[setup_id]['model_name'],
-            train_files      = [setups[setup_id]['eng_train_file'], setups[setup_id]['secondary_train_files']],
+            train_files      = [setups[setup_id]['eng_train_file']] + setups[setup_id]['secondary_train_files'],
             interleave_probs = setups[setup_id]['interleave_probs'],
             output_dir       = setups[setup_id]['output_dir'],
             cache_dir        = setups[setup_id]['cache_dir'],
@@ -320,7 +331,9 @@ if __name__ == "__main__":
             device           = setups[setup_id]['device'],
             batch_size       = setups[setup_id]['batch_size'],
             gradient_accumulation_steps = setups[setup_id]['gradient_accumulation_steps'],
-            truncate         = False,
+            # Upstream passed truncate=False, which train() does not accept. We pack into full
+            # 2048-token sequences, as every later stage (unlearn, distill, relearn) does.
+            join_or_subsequence = setups[setup_id].get('join_or_subsequence', True),
             epochs           = setups[setup_id]['epochs'],
             learning_rate    = setups[setup_id]['learning_rate'],
             max_steps        = setups[setup_id]['max_steps'],   

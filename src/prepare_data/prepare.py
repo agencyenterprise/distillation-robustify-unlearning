@@ -38,8 +38,10 @@ KOR_VALID_OUT = os.path.join(OUT_DIR, "valid_kor.jsonl")
 ENG_TRAIN_OUT = os.path.join(OUT_DIR, "train_eng.jsonl")
 ENG_VALID_OUT = os.path.join(OUT_DIR, "valid_eng.jsonl")
 
-# load tokenizer once
-tokenizer = AutoTokenizer.from_pretrained('google/gemma-2-2b') 
+# load tokenizer once. reduce_gemma.py saves Gemma-2's tokenizer next to the random init; use that copy
+# when it exists, so this step needs no gated Hub access.
+LOCAL_TOKENIZER = MODEL_DIR + "/random_init_models/gemma-2-0.1B"
+tokenizer = AutoTokenizer.from_pretrained(LOCAL_TOKENIZER if os.path.exists(LOCAL_TOKENIZER) else 'google/gemma-2-2b')
 
 def tokenize_lines(lines, doc_max_len, use_one_per_line):
     """
@@ -137,8 +139,10 @@ def build_and_save_dataset(
     train_so_far = 0
     valid_so_far = 0
 
-    fout_train = open(train_out_path, "a", encoding="utf-8")
-    fout_valid = open(valid_out_path, "a", encoding="utf-8")
+    # Write to .partial files and rename at the end: main() skips any dataset whose output exists,
+    # so a crashed run must not leave a complete-looking file behind.
+    fout_train = open(train_out_path + ".partial", "w", encoding="utf-8")
+    fout_valid = open(valid_out_path + ".partial", "w", encoding="utf-8")
 
     with Pool(processes=NUM_PROCESSES) as pool:
         chunk_index = 0
@@ -256,6 +260,11 @@ def build_and_save_dataset(
 
     fout_train.close()
     fout_valid.close()
+    os.replace(train_out_path + ".partial", train_out_path)
+    os.replace(valid_out_path + ".partial", valid_out_path)
+    if train_so_far < train_target or valid_so_far < valid_target:
+        print(f"[WARNING] {filepath} ran out of documents: train {train_so_far}/{train_target}, "
+              f"valid {valid_so_far}/{valid_target} tokens. Download more rows to hit the targets.", flush=True)
 
     return train_so_far, valid_so_far
 

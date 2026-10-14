@@ -117,6 +117,11 @@ def evaluate_ce_loss(model, data_loader, pad_token_id, accelerator, fn_only=Fals
         total_ce_loss += ce_loss.item() * batch_size_local
         total_count += batch_size_local
 
+    # Each rank sees its own shard of the (prepared) loader: sum over ranks so all ranks
+    # log and early-stop on the same full-validation-set number. A no-op on one process.
+    totals = torch.tensor([total_ce_loss, total_count], dtype=torch.float64, device=accelerator.device)
+    total_ce_loss, total_count = accelerator.reduce(totals, reduction="sum").tolist()
+
     model.train()
     return total_ce_loss / max(total_count, 1)
 

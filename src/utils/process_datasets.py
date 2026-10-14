@@ -41,9 +41,10 @@ def make_sequence_length(train_ds_list, tokenizer, max_length, join_or_subsequen
         def filter_long(batch):
             # Return a list of booleans for each example in the batch.
             return [len(ids) <= max_length for ids in batch["input_ids"]]
-        length_before_filter = len(train_ds)
+        length_before_filter = sum(len(ds) for ds in train_ds_list)
         for i, ds in enumerate(train_ds_list): # filter each dataset
             train_ds_list[i] = ds.filter(filter_long, batched=True, batch_size=200_000, num_proc=100)
             train_ds_list[i] = train_ds_list[i].remove_columns("text")
-        message = f'[process_dataset.py] Filtered for items with sequence length <= {max_length}, Percent kept: {len(train_ds) / (1.0 * length_before_filter)}'
+        length_after_filter = sum(len(ds) for ds in train_ds_list)
+        message = f'[process_dataset.py] Filtered for items with sequence length <= {max_length}, Percent kept: {length_after_filter / max(1.0, length_before_filter)}'
     return train_ds_list, message
