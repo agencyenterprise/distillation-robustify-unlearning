@@ -5,7 +5,7 @@ from accelerate import Accelerator
 import os
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.utils.paths import CACHE_DIR, DATASET_DIR, MODEL_DIR, WANDB_API_KEY_PATH
+from src.utils.paths import CACHE_DIR, DATASET_DIR, MODEL_DIR, USE_WANDB, WANDB_API_KEY
 from src.utils.validation_functions import get_korean_and_english_evalaution_fn
 from src.utils.parallel_launch import launch_in_parallel_one_per_gpu, get_parallel_launch_wrapper
 
@@ -20,12 +20,7 @@ LR_RANGES = {
 # Base setups to run - will be expanded with learning rates
 BASE_SETUPS = ["gemma-2-0.1B_GradDiff", "gemma-2-0.1B_MaxEnt", "gemma-2-0.1B_RMU"]
 
-try:
-    with open(WANDB_API_KEY_PATH, "r", encoding="utf-8") as f:
-        api_key = f.read().strip()
-except Exception as e:
-    print(f"[ERROR] Unable to read WandB API key from {WANDB_API_KEY_PATH}. Exception: {e}")
-    exit(1)
+api_key = WANDB_API_KEY
 
 base_setups = {
     "gemma-2-0.1B_GradDiff": {  # renamed from ga
@@ -56,7 +51,7 @@ base_setups = {
         'gradient_clipping_threshold' : 1.0, 
         'max_length'                  : 2048,
 
-        'use_wandb'        : True,
+        'use_wandb'        : USE_WANDB,
         'wandb_project'    : "gemma-2-0.1B_eng+kor_unlearn_GradDiff",
         'wandb_run_name'   : None,
         'wandb_api_key'    : api_key,
@@ -90,7 +85,7 @@ base_setups = {
         'gradient_clipping_threshold' : 1.0, 
         'max_length'                  : 2048,
 
-        'use_wandb'        : True,
+        'use_wandb'        : USE_WANDB,
         'wandb_project'    : "gemma-2-0.1B_eng+kor_unlearn_MaxEnt",
         'wandb_run_name'   : None,
         'wandb_api_key'    : api_key,
@@ -128,7 +123,7 @@ base_setups = {
         'gradient_clipping_threshold' : 1.0, 
         'max_length'                  : 2048,
 
-        'use_wandb'        : True,
+        'use_wandb'        : USE_WANDB,
         'wandb_project'    : "gemma-2-0.1B_eng+kor_unlearn_RMU",
         'wandb_run_name'   : None,
         'wandb_api_key'    : api_key,

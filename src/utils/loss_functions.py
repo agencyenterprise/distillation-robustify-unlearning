@@ -31,7 +31,9 @@ def custom_login():
             if token:
                 hf_token = token
 
-    if hf_token and HUGGINGFACE_HUB_AVAILABLE:
+    if os.environ.get("HF_HUB_OFFLINE") == "1":
+        print("[loss_functions.py] HF_HUB_OFFLINE=1. Skipping HF login.")
+    elif hf_token and HUGGINGFACE_HUB_AVAILABLE:
         try:
             print(f"[loss_functions.py] Logging into Hugging Face with token from {HF_TOKEN_PATH}...")
             login(token=hf_token, add_to_git_credential=True)
@@ -47,7 +49,9 @@ def custom_login():
             token = f.read().strip()
             if token:
                 wandb_token = token
-    if wandb_token:
+    if os.environ.get("WANDB_MODE") == "disabled":
+        print("[loss_functions.py] WANDB_MODE=disabled. Skipping wandb login.")
+    elif wandb_token:
         try:
             import wandb
             print(f"[loss_functions.py] Logging into Weights & Biases with token from {WANDB_TOKEN_PATH}...")

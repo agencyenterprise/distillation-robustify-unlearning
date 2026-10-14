@@ -6,7 +6,7 @@ Launch Command (Single): accelerate launch run_partial_distill_language_sweep_al
 """
 
 from src.tools.partial_distill_langarith import partial_distill
-from src.utils.paths import CACHE_DIR, DATASET_DIR, MODEL_DIR, WANDB_API_KEY_PATH
+from src.utils.paths import CACHE_DIR, DATASET_DIR, MODEL_DIR, USE_WANDB, WANDB_API_KEY
 from accelerate import Accelerator
 from utils.loss_functions import print_acc, custom_login
 from src.utils.validation_functions import get_korean_and_english_evalaution_fn
@@ -61,7 +61,7 @@ setups = {
         'gradient_clipping_threshold' : 1.0, 
         'max_length'                  : 2048,
 
-        'use_wandb'        : True,
+        'use_wandb'        : USE_WANDB,
         'wandb_project'    : "gemma-2-0.1B_eng+kor_ga_distill",
         'wandb_run_name'   : None,
         'use_local_record' : True,

@@ -1,5 +1,5 @@
 from src.tools.distill import distill
-from src.utils.paths import CACHE_DIR, DATASET_DIR, MODEL_DIR, WANDB_API_KEY_PATH
+from src.utils.paths import CACHE_DIR, DATASET_DIR, MODEL_DIR, USE_WANDB, WANDB_API_KEY
 from accelerate import Accelerator
 from datasets import load_dataset
 from utils.loss_functions import print_acc
@@ -17,12 +17,7 @@ from torch.utils.data import DataLoader
 SETUPS_TO_RUN = ["gemma-2-0.1B_MaxEnt"]#, "gemma-2-0.1B_RMU"]
 USE_PARALLEL = False  # Flag to enable/disable parallel execution across GPUs
 
-try:
-    with open(WANDB_API_KEY_PATH, "r", encoding="utf-8") as f:
-        api_key = f.read().strip()
-except Exception as e:
-    print(f"[ERROR] Unable to read WandB API key from {WANDB_API_KEY_PATH}. Exception: {e}")
-    exit(1)
+api_key = WANDB_API_KEY
 
 
 setups = {
@@ -55,7 +50,7 @@ setups = {
         'gradient_clipping_threshold' : 1.0, 
         'max_length'                  : 2048,
 
-        'use_wandb'        : True,
+        'use_wandb'        : USE_WANDB,
         'wandb_project'    : "gemma-2-0.1B_eng+kor_GradDiff_distill",
         'wandb_run_name'   : None,
         'wandb_api_key'    : api_key,
@@ -91,7 +86,7 @@ setups = {
         'gradient_clipping_threshold' : 1.0, 
         'max_length'                  : 2048,
 
-        'use_wandb'        : True,
+        'use_wandb'        : USE_WANDB,
         'wandb_project'    : "gemma-2-0.1B_eng+kor_MaxEnt_distill",
         'wandb_run_name'   : None,
         'wandb_api_key'    : api_key,
@@ -127,7 +122,7 @@ setups = {
         'gradient_clipping_threshold' : 1.0, 
         'max_length'                  : 2048,
 
-        'use_wandb'        : True,
+        'use_wandb'        : USE_WANDB,
         'wandb_project'    : "gemma-2-0.1B_eng+kor_RMU_distill",
         'wandb_run_name'   : None,
         'wandb_api_key'    : api_key,

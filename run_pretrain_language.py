@@ -1,5 +1,5 @@
 from src.tools.pretrain import train
-from src.utils.paths import CACHE_DIR, DATASET_DIR, MODEL_DIR
+from src.utils.paths import CACHE_DIR, DATASET_DIR, MODEL_DIR, USE_WANDB, WANDB_API_KEY
 from accelerate import Accelerator
 from datasets import load_dataset
 from utils.loss_functions import print_acc
@@ -10,15 +10,9 @@ from transformers import (
 )
 from torch.utils.data import DataLoader
 
-WANDB_API_KEY_PATH = "tokens/wandb_token.txt"
 # SETUPS_TO_RUN = ["gemma-2-0.9B_eng+kor", "gemma-2-0.9B_eng", "gemma-2-0.6B_eng+kor", "gemma-2-0.6B_eng",]
 SETUPS_TO_RUN = ['gemma-2-0.1B_eng+kor']
-try:
-    with open(WANDB_API_KEY_PATH, "r", encoding="utf-8") as f:
-        api_key = f.read().strip()
-except Exception as e:
-    print(f"[ERROR] Unable to read WandB API key from {WANDB_API_KEY_PATH}. Exception: {e}")
-    exit(1)
+api_key = WANDB_API_KEY
 
 
 
@@ -51,7 +45,7 @@ setups = {
         'gradient_clipping_threshold' : 1.0, 
         'max_length'                  : 2048,
 
-        'use_wandb'        : True,
+        'use_wandb'        : USE_WANDB,
         'wandb_project'    : "gemma-2-0.1B_eng+kor",
         'wandb_run_name'   : None,
         'wandb_api_key'    : api_key,
@@ -85,7 +79,7 @@ setups = {
         'gradient_clipping_threshold' : 1.0, 
         'max_length'                  : 2048,
 
-        'use_wandb'        : True,
+        'use_wandb'        : USE_WANDB,
         'wandb_project'    : "gemma-2-0.1B_eng",
         'wandb_run_name'   : None,
         'wandb_api_key'    : api_key,
@@ -119,7 +113,7 @@ setups = {
         'gradient_clipping_threshold' : 1.0, 
         'max_length'                  : 2048,
 
-        'use_wandb'        : True,
+        'use_wandb'        : USE_WANDB,
         'wandb_project'    : "gemma-2-0.3B_eng+kor",
         'wandb_run_name'   : None,
         'wandb_api_key'    : api_key,
@@ -153,7 +147,7 @@ setups = {
         'gradient_clipping_threshold' : 1.0, 
         'max_length'                  : 2048,
 
-        'use_wandb'        : True,
+        'use_wandb'        : USE_WANDB,
         'wandb_project'    : "gemma-2-0.3B_eng",
         'wandb_run_name'   : None,
         'wandb_api_key'    : api_key,
@@ -187,7 +181,7 @@ setups = {
         'gradient_clipping_threshold' : 1.0, 
         'max_length'                  : 2048,
 
-        'use_wandb'        : True,
+        'use_wandb'        : USE_WANDB,
         'wandb_project'    : "gemma-2-0.6B_eng+kor",
         'wandb_run_name'   : None,
         'wandb_api_key'    : api_key,
@@ -221,7 +215,7 @@ setups = {
         'gradient_clipping_threshold' : 1.0,
         'max_length'                  : 2048,
 
-        'use_wandb'        : True,
+        'use_wandb'        : USE_WANDB,
         'wandb_project'    : "gemma-2-0.6B_eng",
         'wandb_run_name'   : None,
         'wandb_api_key'    : api_key,
@@ -255,7 +249,7 @@ setups = {
         'gradient_clipping_threshold' : 1.0, 
         'max_length'                  : 2048,
 
-        'use_wandb'        : True,
+        'use_wandb'        : USE_WANDB,
         'wandb_project'    : "gemma-2-0.9B_eng+kor",
         'wandb_run_name'   : None,
         'wandb_api_key'    : api_key,
@@ -289,7 +283,7 @@ setups = {
         'gradient_clipping_threshold' : 1.0, 
         'max_length'                  : 2048,
 
-        'use_wandb'        : True,
+        'use_wandb'        : USE_WANDB,
         'wandb_project'    : "gemma-2-0.9B_eng",
         'wandb_run_name'   : None,
         'wandb_api_key'    : api_key,

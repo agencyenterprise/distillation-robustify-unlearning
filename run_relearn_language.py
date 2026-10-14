@@ -5,7 +5,7 @@ Launch Command: python run_relearn_language.py
 """
 
 from src.tools.relearn_langarith import relearn
-from src.utils.paths import CACHE_DIR, DATASET_DIR, MODEL_DIR, WANDB_API_KEY_PATH
+from src.utils.paths import CACHE_DIR, DATASET_DIR, MODEL_DIR, USE_WANDB, WANDB_API_KEY
 from accelerate import Accelerator
 from utils.loss_functions import custom_login
 from utils.loss_functions import print_acc
@@ -77,12 +77,7 @@ for pareto plot
 # relearning learning rate (search adversary)
 LRS_TO_RUN =[1e-3, 7e-4, 4e-4, 1e-4, 7e-5, 5e-5, 1e-5, 7e-6, 4e-6, 1e-6]
 
-try:
-    with open(WANDB_API_KEY_PATH, "r", encoding="utf-8") as f:
-        api_key = f.read().strip()
-except Exception as e:
-    print(f"[ERROR] Unable to read WandB API key from {WANDB_API_KEY_PATH}. Exception: {e}")
-    exit(1)
+api_key = WANDB_API_KEY
 
 custom_login()
 
@@ -115,7 +110,7 @@ setups = {
         'gradient_clipping_threshold' : 1.0, 
         'max_length'                  : 2048,
 
-        'use_wandb'        : True,
+        'use_wandb'        : USE_WANDB,
         'wandb_project'    : "gemma-2-0.1B_eng+kor",
         'wandb_run_name'   : None,
         'use_local_record' : True,
