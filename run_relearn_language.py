@@ -2,7 +2,11 @@
 Configured for a (any)xH200 GPU server.
 
 Launch Command: python run_relearn_language.py
+AGI-2569:       python run_relearn_language.py --groups refs partial --arms A C --lrs 1e-4 1e-5 [--shard i --num_shards n] [--list]
 """
+import argparse
+import json
+import os
 
 from src.tools.relearn_langarith import relearn
 from src.utils.paths import CACHE_DIR, DATASET_DIR, MODEL_DIR, USE_WANDB, WANDB_API_KEY
@@ -11,6 +15,10 @@ from utils.loss_functions import custom_login
 from utils.loss_functions import print_acc
 from utils.validation_functions import get_korean_and_english_evalaution_fn
 from utils.parallel_launch import launch_in_parallel_one_per_gpu, get_parallel_launch_wrapper
+from src.utils.run_names import (
+    REFERENCE_MODELS, ARMS, RANDOM_TARGET_ARMS, KOR_TARGETS, STOP_MODES, SWEEP_ALPHAS, SWEEP_BETAS, SWEEP_SEEDS,
+    FIXED_STEPS, partial_distill_name, relearn_record_dir,
+)
 
 SETUPS_TO_RUN = [
     "gemma-2-0.1B_train_only_forget"
@@ -130,6 +138,13 @@ def launch_relearn(setup_id, lr, model):
     model_name = model_name = f"relearned_{model.replace('/', '_')}/{lr}" # Get the substring past the first '/'
     current_setup['path_local_record'] = current_setup['path_local_record'].replace('model_name', model_name)
     current_setup['output_dir'] = current_setup['output_dir'].replace('model_name', model_name)
+
+    if relearn_finished(current_setup['path_local_record'], current_setup['max_steps']):
+        print(f"[run_relearn_language.py] {model_name} already finished; skipping.")
+        return
+    # A rerun after a crash starts over, so drop the partial record rather than appending to it.
+    if os.path.exists(current_setup['path_local_record']):
+        os.remove(current_setup['path_local_record'])
     
     accelerator = Accelerator()
 
@@ -177,15 +192,66 @@ def launch_relearn(setup_id, lr, model):
         wandb_run_name   = current_setup['wandb_run_name'],
         use_local_record = current_setup['use_local_record'],
         path_local_record= current_setup['path_local_record'],
-        save_models      = current_setup['save_models']
+        save_models      = current_setup['save_models'],
+        overwrite_ok     = True,  # the record was removed above; output_dir may exist from a crashed run
     )
 
+def relearn_finished(path_local_record, max_steps):
+    """True if the record has the validation at the last step (written just before relearn() returns)."""
+    if not os.path.exists(path_local_record):
+        return False
+    with open(path_local_record, encoding="utf-8") as f:
+        for line in f:
+            record = json.loads(line)
+            if "val/kor_ce_loss" in record and record.get("train/step") == max_steps:
+                return True
+    return False
+
+def agi2569_models(args):
+    """Model paths (relative to MODEL_DIR) written by this fork's scripts, filtered by the CLI flags."""
+    models = []
+    if 'refs' in args.groups:
+        models += [REFERENCE_MODELS[role] for role in args.refs]
+    if 'partial' in args.groups:
+        for arm in args.arms:
+            for kor_targets in (args.kor_targets if arm in RANDOM_TARGET_ARMS else ['uniform']):
+                for alpha in args.alphas:
+                    for beta in args.betas:
+                        for seed in args.seeds:
+                            for stop_mode in args.stop_modes:
+                                models.append(partial_distill_name(arm, alpha, beta, seed, stop_mode, args.fixed_steps, kor_targets))
+    return models
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--groups', nargs='*', choices=['refs', 'partial'], default=None,
+                        help="AGI-2569 model list. Omit to use the upstream MODELS_TO_RUN above.")
+    parser.add_argument('--refs', nargs='+', choices=list(REFERENCE_MODELS), default=list(REFERENCE_MODELS))
+    parser.add_argument('--arms', nargs='+', choices=ARMS, default=ARMS)
+    parser.add_argument('--kor_targets', nargs='+', choices=KOR_TARGETS, default=['uniform'])
+    parser.add_argument('--alphas', nargs='+', type=float, default=SWEEP_ALPHAS)
+    parser.add_argument('--betas', nargs='+', type=float, default=SWEEP_BETAS)
+    parser.add_argument('--seeds', nargs='+', type=int, default=SWEEP_SEEDS)
+    parser.add_argument('--stop_modes', nargs='+', choices=STOP_MODES, default=['fixed_steps'])
+    parser.add_argument('--fixed_steps', type=int, default=FIXED_STEPS)
+    parser.add_argument('--lrs', nargs='+', type=float, default=LRS_TO_RUN)
+    parser.add_argument('--shard', type=int, default=0, help='Run every num_shards-th (model, lr) pair from here')
+    parser.add_argument('--num_shards', type=int, default=1)
+    parser.add_argument('--list', action='store_true', help='Print the (model, lr) pairs and exit')
+    args = parser.parse_args()
+    if args.groups is not None:
+        MODELS_TO_RUN = agi2569_models(args)
     # ----------------------------------------------------------------- #
     # Run all experiments, if possible in parallel
     # ----------------------------------------------------------------- #
     # Create list of the setups (arguments for run_experiment) for all the experiments we want to run 
-    experiments = [(setup_id, lr, model) for setup_id in SETUPS_TO_RUN for lr in LRS_TO_RUN for model in MODELS_TO_RUN]
+    experiments = [(setup_id, lr, model) for setup_id in SETUPS_TO_RUN for lr in args.lrs for model in MODELS_TO_RUN]
+    experiments = experiments[args.shard::args.num_shards]
+    if args.list:
+        for experiment in experiments:
+            print(experiment)
+        print(f"{len(experiments)} runs")
+        raise SystemExit
     # Gets a wrapper function compatable with the parallel launch function
     parallel_fn = get_parallel_launch_wrapper(launch_relearn)
     # calls run_experiment in parallel on a separate gpu for each experiment setup when a gpu is free
