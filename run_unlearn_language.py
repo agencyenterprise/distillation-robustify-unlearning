@@ -171,6 +171,12 @@ for base_setup_id in BASE_SETUPS:
 
 def launch_unlearning_run(setup_id):
     accelerator = Accelerator()
+    if os.path.exists(os.path.join(setups[setup_id]['output_dir'], 'final_model', 'config.json')):
+        print(f"[run_unlearn_language.py] {setup_id} already has a final_model; skipping.")
+        return
+    # A rerun after a crash starts over, so drop the partial record rather than appending to it.
+    if os.path.exists(setups[setup_id]['path_local_record']):
+        os.remove(setups[setup_id]['path_local_record'])
     language_eval_fn = get_korean_and_english_evalaution_fn(
         model_name        = setups[setup_id]['model_name'],
         max_length        = setups[setup_id]['max_length'],
@@ -292,6 +298,17 @@ def launch_unlearning_run(setup_id):
         )
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    # AGI-2569 needs only the UNDO teacher: --methods MaxEnt --lrs 3e-5
+    parser.add_argument('--methods', nargs='+', default=list(LR_RANGES), choices=list(LR_RANGES))
+    parser.add_argument('--lrs', nargs='+', type=float, default=None, help='Default: each method\'s full LR_RANGES sweep')
+    args = parser.parse_args()
+    SETUPS_TO_RUN = [
+        setup_id for setup_id in SETUPS_TO_RUN
+        if setup_id.split('_lr_')[0].split('_')[-1] in args.methods
+        and (args.lrs is None or any(abs(setups[setup_id]['learning_rate'] - lr) < 1e-12 for lr in args.lrs))
+    ]
     # ----------------------------------------------------------------- #
     # Run all experiments, if possible in parallel
     # ----------------------------------------------------------------- #

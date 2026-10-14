@@ -71,10 +71,12 @@ def main(REDUCE_TO):
             if token:
                 hf_token = token
 
-    if hf_token and HUGGINGFACE_HUB_AVAILABLE:
+    if os.environ.get("HF_TOKEN"):
+        print("[reduce_gemma_model.py] Using HF_TOKEN from the environment (huggingface_hub reads it directly).")
+    elif hf_token and HUGGINGFACE_HUB_AVAILABLE:
         try:
             print(f"[reduce_gemma_model.py] Logging into Hugging Face with token from {HF_TOKEN_PATH}...")
-            login(token=hf_token, add_to_git_credential=True)
+            login(token=hf_token)
         except Exception as e:
             print(f"[Warning] Could not login: {e}")
     else:

@@ -1,5 +1,9 @@
 from transformers import AutoTokenizer  # For tokenizer
 from datasets import Dataset  # For dataset handling
+import os
+
+# Worker processes for dataset map/filter. Upstream hard-coded 100; NUM_PROC=1 runs in-process.
+NUM_PROC = int(os.environ.get('NUM_PROC', 100))
 
 
 def make_sequence_length(train_ds_list, tokenizer, max_length, join_or_subsequence):
@@ -33,7 +37,7 @@ def make_sequence_length(train_ds_list, tokenizer, max_length, join_or_subsequen
             train_ds_list[i] = ds.map(
                 create_exact_len,
                 batched=True,
-                num_proc=100,
+                num_proc=NUM_PROC,
                 remove_columns=ds.column_names  # Now we need this to avoid length mismatch
             )
         message = f'[process_dataset.py] Created sliding windows of length {max_length}'
@@ -43,7 +47,7 @@ def make_sequence_length(train_ds_list, tokenizer, max_length, join_or_subsequen
             return [len(ids) <= max_length for ids in batch["input_ids"]]
         length_before_filter = sum(len(ds) for ds in train_ds_list)
         for i, ds in enumerate(train_ds_list): # filter each dataset
-            train_ds_list[i] = ds.filter(filter_long, batched=True, batch_size=200_000, num_proc=100)
+            train_ds_list[i] = ds.filter(filter_long, batched=True, batch_size=200_000, num_proc=NUM_PROC)
             train_ds_list[i] = train_ds_list[i].remove_columns("text")
         length_after_filter = sum(len(ds) for ds in train_ds_list)
         message = f'[process_dataset.py] Filtered for items with sequence length <= {max_length}, Percent kept: {length_after_filter / max(1.0, length_before_filter)}'

@@ -11,6 +11,8 @@ from transformers import (
     DataCollatorWithPadding
 )
 from torch.utils.data import DataLoader
+import argparse
+import os
 
 # Set which model/unlearning method combinations to run
 #SETUPS_TO_RUN = ["gemma-2-0.1B_GradDiff", "gemma-2-0.1B_MaxEnt", "gemma-2-0.1B_RMU"]
@@ -135,6 +137,12 @@ def launch_distillation(setup_id):
     """Function to launch a distillation process for a specific setup"""
     accelerator = Accelerator()
     current_setup = setups[setup_id]
+    if os.path.exists(os.path.join(current_setup['output_dir'], 'final_student', 'config.json')):
+        print(f"[run_distill_language.py] {setup_id} already has a final_student; skipping.")
+        return
+    # A rerun after a crash starts over, so drop the partial record rather than appending to it.
+    if accelerator.is_main_process and os.path.exists(current_setup['path_local_record']):
+        os.remove(current_setup['path_local_record'])
 
     # Create evaluation function for English and Korean
     english_korean_loss_eval_fn = get_korean_and_english_evalaution_fn(
@@ -185,6 +193,10 @@ def launch_distillation(setup_id):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    # gemma-2-0.1B_MaxEnt is the full distillation of Fig 4: MaxEnt teacher (lr 3e-5), random-init student.
+    parser.add_argument('--setups', nargs='+', default=SETUPS_TO_RUN, choices=list(setups))
+    SETUPS_TO_RUN = parser.parse_args().setups
     # ----------------------------------------------------------------- #
     # Run all experiments, if possible in parallel
     # ----------------------------------------------------------------- #

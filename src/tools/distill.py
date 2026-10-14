@@ -351,10 +351,11 @@ def distill(
         if stop_flag:
             break
             
-    # Guaranteed final validation and model saving
+    # Guaranteed final validation and model saving.
+    # Validation runs on every rank: eval_fn reduces across ranks, so a main-only call would hang.
+    print_acc("[distill.py] Running final validation...", print_message)
+    final_val_log_dict = eval_fn(student_model, print_results=True)
     if accelerator.is_main_process:
-        print_acc("[distill.py] Running final validation...", print_message)
-        final_val_log_dict = eval_fn(student_model, print_results=True)
         final_val_log_dict["train/step"] = global_step
         final_val_log_dict["train/global_step"] = global_step * accelerator.num_processes + accelerator.process_index
         final_val_log_dict["train/tokens_seen"] = global_tokens

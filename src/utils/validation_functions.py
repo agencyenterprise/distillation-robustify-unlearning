@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 import time
 from functools import partial
 import re
-from utils.process_datasets import make_sequence_length
+from utils.process_datasets import make_sequence_length, NUM_PROC
 
 
 def evaluate_kd_ce_ppl(student_model, teacher_model, data_loader, pad_token_id, accelerator, fn_only=False):
@@ -119,7 +119,7 @@ def evaluate_ce_loss(model, data_loader, pad_token_id, accelerator, fn_only=Fals
 
     # Each rank sees its own shard of the (prepared) loader: sum over ranks so all ranks
     # log and early-stop on the same full-validation-set number. A no-op on one process.
-    totals = torch.tensor([total_ce_loss, total_count], dtype=torch.float64, device=accelerator.device)
+    totals = torch.tensor([total_ce_loss, total_count], dtype=torch.float32, device=accelerator.device)
     total_ce_loss, total_count = accelerator.reduce(totals, reduction="sum").tolist()
 
     model.train()
@@ -247,14 +247,16 @@ def get_korean_and_english_evalaution_fn(
     print_message = accelerator.is_main_process
     print_acc(f"[validation_functions.py] Eng validation dataset size: {len(eng_valid_ds)}", print_message)
     print_acc(f"[validation_functions.py] Kor validation dataset size: {len(kor_valid_ds)}", print_message)
-    eng_valid_ds = eng_valid_ds.remove_columns("text")
-    kor_valid_ds = kor_valid_ds.remove_columns("text")
+    # prepare.py also writes a per-token loss_mask, which the padding collator leaves unpadded, so any
+    # batch of unequal-length documents fails to stack. Validation uses every token: drop it.
+    eng_valid_ds = eng_valid_ds.remove_columns([c for c in ("text", "loss_mask") if c in eng_valid_ds.column_names])
+    kor_valid_ds = kor_valid_ds.remove_columns([c for c in ("text", "loss_mask") if c in kor_valid_ds.column_names])
     def filter_long(batch):
         # Return a list of booleans for each example in the batch.
         return [len(ids) <= max_length for ids in batch["input_ids"]]
     
-    eng_valid_ds = eng_valid_ds.filter(filter_long, batched=True, batch_size=200_000, num_proc=100)
-    kor_valid_ds = kor_valid_ds.filter(filter_long, batched=True, batch_size=200_000, num_proc=100)
+    eng_valid_ds = eng_valid_ds.filter(filter_long, batched=True, batch_size=200_000, num_proc=NUM_PROC)
+    kor_valid_ds = kor_valid_ds.filter(filter_long, batched=True, batch_size=200_000, num_proc=NUM_PROC)
     
     tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=cache_dir)
     if tokenizer.pad_token_id is None:

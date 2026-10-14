@@ -294,61 +294,63 @@ setups = {
     },
 }
 
+def launch_pretrain(setup_id):
+    accelerator = Accelerator()
+    if os.path.exists(os.path.join(setups[setup_id]['output_dir'], 'final_model', 'config.json')):
+        print_acc(f"[run_pretrain_language.py] {setup_id} already has a final_model; skipping.", accelerator.is_main_process)
+        return
+    # A rerun after a crash starts over, so drop the partial record rather than appending to it.
+    if accelerator.is_main_process and os.path.exists(setups[setup_id]['path_local_record']):
+        os.remove(setups[setup_id]['path_local_record'])
+
+    english_korean_loss_eval_fn = get_korean_and_english_evalaution_fn(
+        model_name          = setups[setup_id]['model_name'], 
+        eng_valid_file      = setups[setup_id]['eng_valid_file'],
+        kor_valid_file      = setups[setup_id]['kor_valid_file'],
+        max_length          = setups[setup_id]['max_length'],
+        dataset_cache_dir   = setups[setup_id]['dataset_cache_dir'], 
+        cache_dir           = setups[setup_id]['cache_dir'],
+        batch_size          = setups[setup_id]['batch_size'],
+        accelerator         = accelerator,
+    )
+
+    train(
+        model_name       = setups[setup_id]['model_name'],
+        train_files      = [setups[setup_id]['eng_train_file']] + setups[setup_id]['secondary_train_files'],
+        interleave_probs = setups[setup_id]['interleave_probs'],
+        output_dir       = setups[setup_id]['output_dir'],
+        cache_dir        = setups[setup_id]['cache_dir'],
+        dataset_cache_dir= setups[setup_id]['dataset_cache_dir'],
+        eval_fn          = english_korean_loss_eval_fn,
+        accelerator      = accelerator,
+        seed             = setups[setup_id]['seed'],
+        device           = setups[setup_id]['device'],
+        batch_size       = setups[setup_id]['batch_size'],
+        gradient_accumulation_steps = setups[setup_id]['gradient_accumulation_steps'],
+        # Upstream passed truncate=False, which train() does not accept. We pack into full
+        # 2048-token sequences, as every later stage (unlearn, distill, relearn) does.
+        join_or_subsequence = setups[setup_id].get('join_or_subsequence', True),
+        epochs           = setups[setup_id]['epochs'],
+        learning_rate    = setups[setup_id]['learning_rate'],
+        max_steps        = setups[setup_id]['max_steps'],   
+        num_warmup_steps = setups[setup_id]['num_warmup_steps'],
+        validation_steps = setups[setup_id]['validation_steps'],
+        save_checkpoint_steps = setups[setup_id]['save_checkpoint_steps'],
+        scheduler_type   = setups[setup_id]['scheduler_type'],  
+        min_lr           = setups[setup_id]['min_lr'],          
+        weight_decay     = setups[setup_id]['weight_decay'],    
+        gradient_clipping_threshold = setups[setup_id]['gradient_clipping_threshold'], 
+        max_length       = setups[setup_id]['max_length'],
+        use_wandb        = setups[setup_id]['use_wandb'],
+        wandb_project    = setups[setup_id]['wandb_project'],
+        wandb_run_name   = setups[setup_id]['wandb_run_name'],
+        wandb_api_key    = setups[setup_id]['wandb_api_key'],
+        use_local_record = setups[setup_id]['use_local_record'],
+        path_local_record= setups[setup_id]['path_local_record'],
+    )
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--setups', nargs='+', default=SETUPS_TO_RUN, choices=list(setups))
-    args = parser.parse_args()
-    for setup_id in args.setups:
-        accelerator = Accelerator()
-        if os.path.exists(os.path.join(setups[setup_id]['output_dir'], 'final_model', 'config.json')):
-            print_acc(f"[run_pretrain_language.py] {setup_id} already has a final_model; skipping.", accelerator.is_main_process)
-            continue
-        # A rerun after a crash starts over, so drop the partial record rather than appending to it.
-        if accelerator.is_main_process and os.path.exists(setups[setup_id]['path_local_record']):
-            os.remove(setups[setup_id]['path_local_record'])
-
-        english_korean_loss_eval_fn = get_korean_and_english_evalaution_fn(
-            model_name          = setups[setup_id]['model_name'], 
-            eng_valid_file      = setups[setup_id]['eng_valid_file'],
-            kor_valid_file      = setups[setup_id]['kor_valid_file'],
-            max_length          = setups[setup_id]['max_length'],
-            dataset_cache_dir   = setups[setup_id]['dataset_cache_dir'], 
-            cache_dir           = setups[setup_id]['cache_dir'],
-            batch_size          = setups[setup_id]['batch_size'],
-            accelerator         = accelerator,
-        )
-
-        train(
-            model_name       = setups[setup_id]['model_name'],
-            train_files      = [setups[setup_id]['eng_train_file']] + setups[setup_id]['secondary_train_files'],
-            interleave_probs = setups[setup_id]['interleave_probs'],
-            output_dir       = setups[setup_id]['output_dir'],
-            cache_dir        = setups[setup_id]['cache_dir'],
-            dataset_cache_dir= setups[setup_id]['dataset_cache_dir'],
-            eval_fn          = english_korean_loss_eval_fn,
-            accelerator      = accelerator,
-            seed             = setups[setup_id]['seed'],
-            device           = setups[setup_id]['device'],
-            batch_size       = setups[setup_id]['batch_size'],
-            gradient_accumulation_steps = setups[setup_id]['gradient_accumulation_steps'],
-            # Upstream passed truncate=False, which train() does not accept. We pack into full
-            # 2048-token sequences, as every later stage (unlearn, distill, relearn) does.
-            join_or_subsequence = setups[setup_id].get('join_or_subsequence', True),
-            epochs           = setups[setup_id]['epochs'],
-            learning_rate    = setups[setup_id]['learning_rate'],
-            max_steps        = setups[setup_id]['max_steps'],   
-            num_warmup_steps = setups[setup_id]['num_warmup_steps'],
-            validation_steps = setups[setup_id]['validation_steps'],
-            save_checkpoint_steps = setups[setup_id]['save_checkpoint_steps'],
-            scheduler_type   = setups[setup_id]['scheduler_type'],  
-            min_lr           = setups[setup_id]['min_lr'],          
-            weight_decay     = setups[setup_id]['weight_decay'],    
-            gradient_clipping_threshold = setups[setup_id]['gradient_clipping_threshold'], 
-            max_length       = setups[setup_id]['max_length'],
-            use_wandb        = setups[setup_id]['use_wandb'],
-            wandb_project    = setups[setup_id]['wandb_project'],
-            wandb_run_name   = setups[setup_id]['wandb_run_name'],
-            wandb_api_key    = setups[setup_id]['wandb_api_key'],
-            use_local_record = setups[setup_id]['use_local_record'],
-            path_local_record= setups[setup_id]['path_local_record'],
-        )
+    for setup_id in parser.parse_args().setups:
+        launch_pretrain(setup_id)
