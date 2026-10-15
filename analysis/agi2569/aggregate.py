@@ -4,7 +4,10 @@ Aggregates AGI-2569 relearning records into robustness and compute tables.
 Input: a copy of {MODEL_DIR}/local_records (e.g. `aws s3 sync s3://ae-gr/agi-2569/local_records <dir>`).
 Only the small JSONL records are read; no models.
 
-    python analysis/agi2569/aggregate.py <local_records dir> [--out <dir>]
+    python analysis/agi2569/aggregate.py <local_records dir> [--out <dir>] [--teacher_lr 8e-5]
+
+Only models of one MaxEnt teacher LR are aggregated (--teacher_lr, default 8e-5, the paper's); base and the
+data-filtered oracle do not depend on it.
 
 Definitions
 - Relearned Korean loss of a model: the attacker fine-tunes on Korean for 500 steps at each LR of a sweep;
@@ -32,15 +35,14 @@ import sys
 import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-from src.utils.run_names import REFERENCE_MODELS, relearn_record_dir  # noqa: E402
+from src.utils.run_names import TEACHER_LR, lr_tag, reference_models, relearn_record_dir  # noqa: E402
 
 DEFINITIONS = ("min_any_step", "min_final")
 KL_ARMS = ("A", "B")
 PARTIAL_RE = re.compile(
-    r"partial_distill-arm_(?P<arm>[A-F](?:_uniform|_unigram)?)-alpha_(?P<alpha>[\d.]+)-beta_(?P<beta>[\d.]+)"
-    r"-seed_(?P<seed>\d+)-(?P<stop>fixed_steps_\d+|early_stop)$"
+    r"partial_distill-teacher_lr_(?P<teacher_lr>[\d.e+-]+)-arm_(?P<arm>[A-F](?:_uniform|_unigram)?)"
+    r"-alpha_(?P<alpha>[\d.]+)-beta_(?P<beta>[\d.]+)-seed_(?P<seed>\d+)-(?P<stop>fixed_steps_\d+|early_stop)$"
 )
-REF_DIRS = {relearn_record_dir(path): role for role, path in REFERENCE_MODELS.items()}
 
 
 def read_jsonl(path):
@@ -48,26 +50,27 @@ def read_jsonl(path):
         return [json.loads(line) for line in f if line.strip()]
 
 
-def describe_model(record_dir):
-    """Metadata for a relearned_* directory name, or None if it is not one of ours."""
-    if record_dir in REF_DIRS:
-        return {"model": record_dir, "role": REF_DIRS[record_dir], "arm": None, "alpha": None, "beta": None,
+def describe_model(record_dir, teacher_lr=TEACHER_LR):
+    """Metadata for a relearned_* directory name, or None if it is not one of ours at this teacher LR."""
+    ref_dirs = {relearn_record_dir(path): role for role, path in reference_models(teacher_lr).items()}
+    if record_dir in ref_dirs:
+        return {"model": record_dir, "role": ref_dirs[record_dir], "arm": None, "alpha": None, "beta": None,
                 "seed": None, "stop": None}
     match = PARTIAL_RE.search(record_dir)
-    if match is None:
+    if match is None or match["teacher_lr"] != lr_tag(teacher_lr):
         return None
     return {"model": record_dir, "role": "partial", "arm": match["arm"], "alpha": float(match["alpha"]),
             "beta": float(match["beta"]), "seed": int(match["seed"]), "stop": match["stop"]}
 
 
-def load_relearn_curves(records_root):
+def load_relearn_curves(records_root, teacher_lr=TEACHER_LR):
     """Long table: one row per (model, lr, step) validation point."""
     rows = []
     base = os.path.join(records_root, "relearned_models")
     for record_dir in sorted(os.listdir(base)):
-        meta = describe_model(record_dir)
+        meta = describe_model(record_dir, teacher_lr)
         if meta is None:
-            print(f"[aggregate] skipping unrecognised {record_dir}")
+            print(f"[aggregate] skipping {record_dir} (not ours, or another teacher LR than {lr_tag(teacher_lr)})")
             continue
         for fname in os.listdir(os.path.join(base, record_dir)):
             if not fname.endswith("_only_forget_data.txt"):
@@ -131,12 +134,13 @@ def training_tokens(records_root, record_path):
     return training_max(records_root, record_path, "train/tokens_seen")
 
 
-def add_compute(summary, records_root, filter_tokens=None, filter_steps=None):
+def add_compute(summary, records_root, filter_tokens=None, filter_steps=None, teacher_lr=TEACHER_LR):
     """Tokens and steps each model's retraining took, and their ratios to data filtering."""
+    refs = reference_models(teacher_lr)
     if filter_tokens is None:
-        filter_tokens = training_tokens(records_root, REFERENCE_MODELS["filter"] + ".txt")
+        filter_tokens = training_tokens(records_root, refs["filter"] + ".txt")
     if filter_steps is None:
-        filter_steps = training_max(records_root, REFERENCE_MODELS["full_distill"] + ".txt", "train/step")
+        filter_steps = training_max(records_root, refs["full_distill"] + ".txt", "train/step")
     tokens, steps, units = [], [], []
     for _, row in summary.iterrows():
         if row.role == "partial":
@@ -145,7 +149,7 @@ def add_compute(summary, records_root, filter_tokens=None, filter_steps=None):
             record = f"partial_distill_models/{name}.txt"
             units.append(4 if row.arm in KL_ARMS else 3)
         elif row.role == "full_distill":
-            record = REFERENCE_MODELS["full_distill"] + ".txt"
+            record = refs["full_distill"] + ".txt"
             units.append(4)
         else:
             record = None
@@ -163,9 +167,9 @@ def add_compute(summary, records_root, filter_tokens=None, filter_steps=None):
     return summary
 
 
-def aggregate(records_root, filter_tokens=None, filter_steps=None):
-    curves = load_relearn_curves(records_root)
-    summary = add_compute(add_robustness(worst_case(curves)), records_root, filter_tokens, filter_steps)
+def aggregate(records_root, filter_tokens=None, filter_steps=None, teacher_lr=TEACHER_LR):
+    curves = load_relearn_curves(records_root, teacher_lr)
+    summary = add_compute(add_robustness(worst_case(curves)), records_root, filter_tokens, filter_steps, teacher_lr)
     return curves, summary
 
 
@@ -173,13 +177,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("records_root", help="local copy of {MODEL_DIR}/local_records")
     parser.add_argument("--out", default="analysis/agi2569/out")
+    parser.add_argument("--teacher_lr", type=float, default=TEACHER_LR,
+                        help="aggregate the models of this MaxEnt teacher LR (default 8e-5, the paper's)")
     parser.add_argument("--filter_tokens", type=float, default=None,
                         help="override the oracle's pretraining tokens if its record is missing")
     parser.add_argument("--filter_steps", type=float, default=None,
                         help="override the steps-axis denominator (default: full distillation's steps; paper ~806)")
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
-    curves, summary = aggregate(args.records_root, args.filter_tokens, args.filter_steps)
+    curves, summary = aggregate(args.records_root, args.filter_tokens, args.filter_steps, args.teacher_lr)
     curves.to_csv(os.path.join(args.out, "relearn_curves.csv"), index=False)
     worst_case_curve(curves).to_csv(os.path.join(args.out, "relearn_envelope.csv"), index=False)
     summary.to_csv(os.path.join(args.out, "summary.csv"), index=False)

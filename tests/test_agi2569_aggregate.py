@@ -10,7 +10,9 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "analysis", "agi2569"))
 import aggregate  # noqa: E402
 import plot  # noqa: E402
-from src.utils.run_names import REFERENCE_MODELS, partial_distill_name, relearn_record_dir  # noqa: E402
+from src.utils.run_names import (  # noqa: E402
+    REFERENCE_MODELS, TEACHER_LR, partial_distill_name, reference_models, relearn_record_dir,
+)
 
 
 def write(path, records):
@@ -95,3 +97,32 @@ def test_envelope_and_plots(records, tmp_path):
     plot.fig5b(curves, out, "C", "fixed_steps_500", paper)
     for name in ("fig4_relearning", "fig5_robustness", "fig5b_relearning"):
         assert os.path.getsize(f"{out}/{name}.png") > 0
+
+
+def test_teacher_lr_in_every_downstream_path():
+    assert TEACHER_LR == 8e-5
+    refs3, refs8 = reference_models(3e-5), reference_models(8e-5)
+    assert refs8 == REFERENCE_MODELS
+    assert refs8["unlearn"] == "unlearned_models/MaxEnt/gemma-2-0.1B_eng+kor_lr_8.0e-05"   # run_unlearn_language.py's path
+    assert refs3["unlearn"] == "unlearned_models/MaxEnt/gemma-2-0.1B_eng+kor_lr_3.0e-05"
+    for role in ("unlearn", "full_distill"):
+        assert refs3[role] != refs8[role]
+    for role in ("base", "filter"):
+        assert refs3[role] == refs8[role]
+    assert partial_distill_name("A", 0.3, 0.1, 111, teacher_lr=3e-5) != partial_distill_name("A", 0.3, 0.1, 111)
+    assert "teacher_lr_8.0e-05" in partial_distill_name("A", 0.3, 0.1, 111)
+
+
+def test_other_teacher_lr_kept_apart(records):
+    # A 3e-5 teacher's unlearned ref and arm A run: ignored by default, the only teacher-dependent rows at 3e-5.
+    relearn(records, reference_models(3e-5)["unlearn"], 1e-4, {0: 11.0, 5: 1.0, 10: 1.0})
+    a3 = partial_distill_name("A", 0.3, 0.1, 111, teacher_lr=3e-5)
+    relearn(records, a3, 1e-4, {0: 10.0, 5: 5.0, 10: 5.0})
+    _, summary = aggregate.aggregate(records)
+    assert len(summary[summary.arm == "A"]) == 2   # one row per definition: only the 8e-5 run
+    assert row(summary, "A", "min_any_step").robustness == pytest.approx(1.0)
+    _, summary3 = aggregate.aggregate(records, teacher_lr=3e-5)
+    assert set(summary3.arm.dropna()) == {"A"}
+    # unlearn ref 1.0 (min_any_step), filter 6.0: (5 - 1) / (6 - 1)
+    assert row(summary3, "A", "min_any_step").robustness == pytest.approx(0.8)
+

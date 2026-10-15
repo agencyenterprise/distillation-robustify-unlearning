@@ -10,6 +10,7 @@
 # Array tasks split the (model, LR) list. Arguments go to run_relearn_language.py, e.g.
 #   sbatch --array=0-1 cluster/agi2569/relearn.sbatch --groups refs
 #   sbatch --array=0-7%2 cluster/agi2569/relearn.sbatch --groups partial --arms A B C D E F
+# The unlearn/full_distill refs and partial models are those of teacher lr 8e-5 unless --teacher_lr says otherwise.
 # Preview the list on the login node first: ... run_relearn_language.py <same args> --list
 source cluster/agi2569/env.sh
 $PY run_relearn_language.py \

@@ -2,7 +2,8 @@
 Configured for a (any)xH200 GPU server.
 
 Launch Command: python run_relearn_language.py
-AGI-2569:       python run_relearn_language.py --groups refs partial --arms A C --lrs 1e-4 1e-5 [--shard i --num_shards n] [--list]
+AGI-2569:       python run_relearn_language.py --groups refs partial --arms A C --lrs 1e-4 1e-5 [--teacher_lr 8e-5]
+                    [--shard i --num_shards n] [--list]
 """
 import argparse
 import json
@@ -17,7 +18,7 @@ from utils.validation_functions import get_korean_and_english_evalaution_fn
 from utils.parallel_launch import launch_in_parallel_one_per_gpu, get_parallel_launch_wrapper
 from src.utils.run_names import (
     REFERENCE_MODELS, ARMS, RANDOM_TARGET_ARMS, KOR_TARGETS, STOP_MODES, SWEEP_ALPHAS, SWEEP_BETAS, SWEEP_SEEDS,
-    FIXED_STEPS, partial_distill_name, relearn_record_dir,
+    FIXED_STEPS, TEACHER_LR, partial_distill_name, reference_models, relearn_record_dir,
 )
 
 SETUPS_TO_RUN = [
@@ -211,7 +212,7 @@ def agi2569_models(args):
     """Model paths (relative to MODEL_DIR) written by this fork's scripts, filtered by the CLI flags."""
     models = []
     if 'refs' in args.groups:
-        models += [REFERENCE_MODELS[role] for role in args.refs]
+        models += [reference_models(args.teacher_lr)[role] for role in args.refs]
     if 'partial' in args.groups:
         for arm in args.arms:
             for kor_targets in (args.kor_targets if arm in RANDOM_TARGET_ARMS else ['uniform']):
@@ -219,7 +220,8 @@ def agi2569_models(args):
                     for beta in args.betas:
                         for seed in args.seeds:
                             for stop_mode in args.stop_modes:
-                                models.append(partial_distill_name(arm, alpha, beta, seed, stop_mode, args.fixed_steps, kor_targets))
+                                models.append(partial_distill_name(arm, alpha, beta, seed, stop_mode, args.fixed_steps,
+                                                                   kor_targets, args.teacher_lr))
     return models
 
 if __name__ == "__main__":
@@ -234,6 +236,8 @@ if __name__ == "__main__":
     parser.add_argument('--seeds', nargs='+', type=int, default=SWEEP_SEEDS)
     parser.add_argument('--stop_modes', nargs='+', choices=STOP_MODES, default=['fixed_steps'])
     parser.add_argument('--fixed_steps', type=int, default=FIXED_STEPS)
+    parser.add_argument('--teacher_lr', type=float, default=TEACHER_LR,
+                        help='MaxEnt teacher LR of the unlearn/full_distill refs and partial models (default 8e-5)')
     parser.add_argument('--lrs', nargs='+', type=float, default=LRS_TO_RUN)
     parser.add_argument('--shard', type=int, default=0, help='Run every num_shards-th (model, lr) pair from here')
     parser.add_argument('--num_shards', type=int, default=1)

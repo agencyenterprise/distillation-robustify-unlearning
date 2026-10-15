@@ -5,6 +5,7 @@ from datasets import load_dataset
 from utils.loss_functions import print_acc
 from utils.validation_functions import get_korean_and_english_evalaution_fn
 from utils.parallel_launch import launch_in_parallel_one_per_gpu, get_parallel_launch_wrapper
+from src.utils.run_names import TEACHER_LR, full_distill_model, unlearned_model
 
 from transformers import (
     AutoTokenizer,
@@ -60,13 +61,14 @@ setups = {
         'path_local_record': f"{MODEL_DIR}/local_records/distilled_models/GradDiff/gemma-2-0.1B_eng+kor.txt",
     },
     "gemma-2-0.1B_MaxEnt": {  # renamed from uf
-        'teacher_model_name': f"{MODEL_DIR}/unlearned_models/MaxEnt/gemma-2-0.1B_eng+kor_lr_3.0e-05/final_model",
+        # Teacher, output and record paths come from --teacher_lr (set_maxent_teacher_lr); the paper uses 8e-5.
+        'teacher_model_name': f"{MODEL_DIR}/{unlearned_model(TEACHER_LR)}/final_model",
         'student_model_name': f"{MODEL_DIR}/random_init_models/gemma-2-0.1B",
         'eng_train_file'    : f"{DATASET_DIR}/pretrain/train_eng.jsonl",
         'kor_train_file'    : f"{DATASET_DIR}/pretrain/train_kor.jsonl",
         'eng_valid_file'    : f"{DATASET_DIR}/pretrain/valid_eng.jsonl",
         'kor_valid_file'    : f"{DATASET_DIR}/pretrain/valid_kor.jsonl",
-        'output_dir'        : f"{MODEL_DIR}/distilled_models/MaxEnt/gemma-2-0.1B_eng+kor",
+        'output_dir'        : f"{MODEL_DIR}/{full_distill_model(TEACHER_LR)}",
         'cache_dir'         : CACHE_DIR,
         'dataset_cache_dir' : CACHE_DIR,
         'join_or_subsequence': True,
@@ -93,7 +95,7 @@ setups = {
         'wandb_run_name'   : None,
         'wandb_api_key'    : api_key,
         'use_local_record' : True,
-        'path_local_record': f"{MODEL_DIR}/local_records/distilled_models/MaxEnt/gemma-2-0.1B_eng+kor.txt",
+        'path_local_record': f"{MODEL_DIR}/local_records/{full_distill_model(TEACHER_LR)}.txt",
     },
     "gemma-2-0.1B_RMU": {
         'teacher_model_name': f"{MODEL_DIR}/unlearned_models/RMU/gemma-2-0.1B_eng+kor_lr_3.0e-05/final_model",
@@ -132,6 +134,15 @@ setups = {
         'path_local_record': f"{MODEL_DIR}/local_records/distilled_models/RMU/gemma-2-0.1B_eng+kor.txt",
     },
 }
+
+def set_maxent_teacher_lr(teacher_lr):
+    """Point gemma-2-0.1B_MaxEnt at the MaxEnt teacher trained at teacher_lr; its paths encode the LR."""
+    setups["gemma-2-0.1B_MaxEnt"].update(
+        teacher_model_name=f"{MODEL_DIR}/{unlearned_model(teacher_lr)}/final_model",
+        output_dir=f"{MODEL_DIR}/{full_distill_model(teacher_lr)}",
+        path_local_record=f"{MODEL_DIR}/local_records/{full_distill_model(teacher_lr)}.txt",
+    )
+
 
 def launch_distillation(setup_id):
     """Function to launch a distillation process for a specific setup"""
@@ -194,9 +205,13 @@ def launch_distillation(setup_id):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    # gemma-2-0.1B_MaxEnt is the full distillation of Fig 4: MaxEnt teacher (lr 3e-5), random-init student.
+    # gemma-2-0.1B_MaxEnt is the full distillation of Fig 4: MaxEnt teacher (--teacher_lr), random-init student.
     parser.add_argument('--setups', nargs='+', default=SETUPS_TO_RUN, choices=list(setups))
-    SETUPS_TO_RUN = parser.parse_args().setups
+    parser.add_argument('--teacher_lr', type=float, default=TEACHER_LR,
+                        help='MaxEnt teacher LR (default 8e-5, the paper\'s; upstream hard-coded 3e-5)')
+    cli_args = parser.parse_args()
+    SETUPS_TO_RUN = cli_args.setups
+    set_maxent_teacher_lr(cli_args.teacher_lr)
     # ----------------------------------------------------------------- #
     # Run all experiments, if possible in parallel
     # ----------------------------------------------------------------- #

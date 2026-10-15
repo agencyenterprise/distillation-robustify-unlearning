@@ -3,6 +3,7 @@ Fig 4 and Fig 5 style plots for AGI-2569, one curve per arm.
 
     python analysis/agi2569/plot.py <local_records dir> [--out <dir>] [--definition min_final|min_any_step]
                                     [--stop fixed_steps_500|early_stop] [--compute steps|flops|tokens] [--paper]
+                                    [--teacher_lr 8e-5]
 
 fig4_relearning.png  Attacker's envelope (min over LRs at each step) of Korean loss during relearning, for the
                      reference models and each arm at alpha = 0 (arm C at alpha 0 = "unlearn, then fine-tune on
@@ -25,7 +26,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from aggregate import aggregate, worst_case_curve  # noqa: E402
+from aggregate import TEACHER_LR, aggregate, worst_case_curve  # noqa: E402
 
 PAPER_TARGETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "paper_targets.json")
 PAPER_KW = dict(linestyle=(0, (4, 2)), linewidth=1.2, alpha=0.6)  # paper overlays: thin, dashed
@@ -161,6 +162,7 @@ def main():
     parser.add_argument("--out", default="analysis/agi2569/out")
     parser.add_argument("--definition", choices=["min_final", "min_any_step"], default="min_final")
     parser.add_argument("--stop", default="fixed_steps_500")
+    parser.add_argument("--teacher_lr", type=float, default=TEACHER_LR, help="MaxEnt teacher LR (default 8e-5)")
     parser.add_argument("--compute", choices=["steps", "flops", "tokens"], default="steps")
     parser.add_argument("--filter_tokens", type=float, default=None)
     parser.add_argument("--filter_steps", type=float, default=None)
@@ -168,7 +170,7 @@ def main():
     parser.add_argument("--paper", action="store_true", help="overlay the paper's values (paper_targets.json)")
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
-    curves, summary = aggregate(args.records_root, args.filter_tokens, args.filter_steps)
+    curves, summary = aggregate(args.records_root, args.filter_tokens, args.filter_steps, args.teacher_lr)
     paper = load_paper() if args.paper else None
     fig4(curves, args.out, paper)
     fig5(summary, args.out, args.definition, args.stop, args.compute, paper)
