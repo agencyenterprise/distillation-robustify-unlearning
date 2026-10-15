@@ -18,6 +18,10 @@ Definitions
   data-filtered oracle. `compute_ratio_tokens` counts tokens; `compute_ratio_flops` weights a KL token by 4
   (teacher forward 2N + student forward/backward 6N, in units of 2N) and a CE or pretraining token by 3.
   The unlearning step itself (100 MaxEnt steps) is not counted.
+  `compute_ratio_steps` is the paper's Fig 5 axis: optimizer steps over the steps of full distillation, which ran
+  the same number of steps as pretraining (~806 in the paper; see paper_targets.md). It needs both runs on the
+  same GPU geometry (4 GPUs, 960 sequences per step).
+- The paper's robustness uses the worst-case curve's value at the last step, which is `min_final`.
 """
 import argparse
 import json
@@ -115,41 +119,53 @@ def add_robustness(summary):
     return pd.concat(out, ignore_index=True)
 
 
-def training_tokens(records_root, record_path):
+def training_max(records_root, record_path, key):
+    """Largest value of `key` (e.g. train/tokens_seen, train/step) in a training record; nan if missing."""
     path = os.path.join(records_root, record_path)
     if not os.path.exists(path):
         return float("nan")
-    return max((rec.get("train/tokens_seen", 0) for rec in read_jsonl(path)), default=float("nan"))
+    return max((rec.get(key, 0) for rec in read_jsonl(path)), default=float("nan"))
 
 
-def add_compute(summary, records_root, filter_tokens=None):
-    """Tokens each model's retraining saw, and the ratio to data filtering's pretraining."""
+def training_tokens(records_root, record_path):
+    return training_max(records_root, record_path, "train/tokens_seen")
+
+
+def add_compute(summary, records_root, filter_tokens=None, filter_steps=None):
+    """Tokens and steps each model's retraining took, and their ratios to data filtering."""
     if filter_tokens is None:
         filter_tokens = training_tokens(records_root, REFERENCE_MODELS["filter"] + ".txt")
-    tokens, units = [], []
+    if filter_steps is None:
+        filter_steps = training_max(records_root, REFERENCE_MODELS["full_distill"] + ".txt", "train/step")
+    tokens, steps, units = [], [], []
     for _, row in summary.iterrows():
         if row.role == "partial":
             # relearned_partial_distill_models_<name> -> partial_distill_models/<name>.txt
             name = row.model[len("relearned_partial_distill_models_"):]
-            tokens.append(training_tokens(records_root, f"partial_distill_models/{name}.txt"))
+            record = f"partial_distill_models/{name}.txt"
             units.append(4 if row.arm in KL_ARMS else 3)
         elif row.role == "full_distill":
-            tokens.append(training_tokens(records_root, REFERENCE_MODELS["full_distill"] + ".txt"))
+            record = REFERENCE_MODELS["full_distill"] + ".txt"
             units.append(4)
         else:
-            tokens.append(float("nan"))
+            record = None
             units.append(float("nan"))
+        tokens.append(training_tokens(records_root, record) if record else float("nan"))
+        steps.append(training_max(records_root, record, "train/step") if record else float("nan"))
     summary = summary.copy()
     summary["train_tokens"] = tokens
+    summary["train_steps"] = steps
+    summary["compute_ratio_steps"] = summary.train_steps / filter_steps
     summary["compute_ratio_tokens"] = summary.train_tokens / filter_tokens
     summary["compute_ratio_flops"] = summary.train_tokens * pd.Series(units, index=summary.index) / (3 * filter_tokens)
     summary.attrs["filter_tokens"] = filter_tokens
+    summary.attrs["filter_steps"] = filter_steps
     return summary
 
 
-def aggregate(records_root, filter_tokens=None):
+def aggregate(records_root, filter_tokens=None, filter_steps=None):
     curves = load_relearn_curves(records_root)
-    summary = add_compute(add_robustness(worst_case(curves)), records_root, filter_tokens)
+    summary = add_compute(add_robustness(worst_case(curves)), records_root, filter_tokens, filter_steps)
     return curves, summary
 
 
@@ -159,14 +175,16 @@ def main():
     parser.add_argument("--out", default="analysis/agi2569/out")
     parser.add_argument("--filter_tokens", type=float, default=None,
                         help="override the oracle's pretraining tokens if its record is missing")
+    parser.add_argument("--filter_steps", type=float, default=None,
+                        help="override the steps-axis denominator (default: full distillation's steps; paper ~806)")
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
-    curves, summary = aggregate(args.records_root, args.filter_tokens)
+    curves, summary = aggregate(args.records_root, args.filter_tokens, args.filter_steps)
     curves.to_csv(os.path.join(args.out, "relearn_curves.csv"), index=False)
     worst_case_curve(curves).to_csv(os.path.join(args.out, "relearn_envelope.csv"), index=False)
     summary.to_csv(os.path.join(args.out, "summary.csv"), index=False)
     cols = ["role", "arm", "alpha", "stop", "eng_loss_before", "relearned_kor_loss", "worst_lr", "robustness",
-            "compute_ratio_flops"]
+            "compute_ratio_flops", "compute_ratio_steps"]
     for definition in DEFINITIONS:
         print(f"\n== worst case: {definition} ==")
         print(summary[summary.definition == definition][cols].sort_values(["role", "arm", "alpha"]).to_string(index=False))

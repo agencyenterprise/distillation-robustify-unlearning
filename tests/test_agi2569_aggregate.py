@@ -37,11 +37,13 @@ def records(tmp_path):
     relearn(root, REFERENCE_MODELS["filter"], 1e-4, {0: 9.0, 5: 6.0, 10: 6.0})
     relearn(root, REFERENCE_MODELS["base"], 1e-4, {0: 1.5, 5: 1.4, 10: 1.4})
     write(f"{root}/{REFERENCE_MODELS['filter']}.txt", [{"train/tokens_seen": 1000}, {"train/tokens_seen": 2000}])
+    # Full distillation: 800 steps, the steps-axis denominator.
+    write(f"{root}/{REFERENCE_MODELS['full_distill']}.txt", [{"train/step": 799}, {"train/step": 800}])
     # Arm C, alpha 0.3: LR 1e-4 dips to 3.0 mid-run then ends at 5.0; LR 1e-5 ends at 4.0.
     c = partial_distill_name("C", 0.3, 0.1, 111)
     relearn(root, c, 1e-4, {0: 10.0, 5: 3.0, 10: 5.0})
     relearn(root, c, 1e-5, {0: 10.0, 5: 4.5, 10: 4.0})
-    write(f"{root}/{c}.txt", [{"train/tokens_seen": 100}, {"train/tokens_seen": 200}])
+    write(f"{root}/{c}.txt", [{"train/tokens_seen": 100, "train/step": 100}, {"train/tokens_seen": 200, "train/step": 200}])
     # Arm A (KL), alpha 0.3: ends at 6.0 with 200 tokens.
     a = partial_distill_name("A", 0.3, 0.1, 111)
     relearn(root, a, 1e-4, {0: 10.0, 5: 6.0, 10: 6.0})
@@ -76,6 +78,7 @@ def test_compute_ratio(records):
     assert c.compute_ratio_tokens == pytest.approx(0.1)
     assert c.compute_ratio_flops == pytest.approx(0.1)        # CE: 3 units per token, like pretraining
     assert a.compute_ratio_flops == pytest.approx(0.1 * 4 / 3)  # KL: plus a teacher forward
+    assert c.compute_ratio_steps == pytest.approx(200 / 800)    # steps over full distillation's steps
 
 
 def test_envelope_and_plots(records, tmp_path):
@@ -85,6 +88,10 @@ def test_envelope_and_plots(records, tmp_path):
     assert c_env.to_dict() == {0: 10.0, 5: 3.0, 10: 4.0}
     out = str(tmp_path / "out")
     os.makedirs(out)
-    plot.fig4(curves, out)
-    plot.fig5(summary, out, "min_any_step", "fixed_steps_500", "flops")
-    assert os.path.getsize(f"{out}/fig4_relearning.png") > 0 and os.path.getsize(f"{out}/fig5_robustness.png") > 0
+    paper = plot.load_paper()
+    plot.fig4(curves, out, paper)
+    plot.fig5(summary, out, "min_any_step", "fixed_steps_500", "flops", paper)
+    plot.fig5(summary, out, "min_final", "early_stop", "steps", paper)
+    plot.fig5b(curves, out, "C", "fixed_steps_500", paper)
+    for name in ("fig4_relearning", "fig5_robustness", "fig5b_relearning"):
+        assert os.path.getsize(f"{out}/{name}.png") > 0
