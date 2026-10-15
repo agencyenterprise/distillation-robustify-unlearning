@@ -48,7 +48,10 @@ def make_sequence_length(train_ds_list, tokenizer, max_length, join_or_subsequen
         length_before_filter = sum(len(ds) for ds in train_ds_list)
         for i, ds in enumerate(train_ds_list): # filter each dataset
             train_ds_list[i] = ds.filter(filter_long, batched=True, batch_size=200_000, num_proc=NUM_PROC)
-            train_ds_list[i] = train_ds_list[i].remove_columns("text")
+            # Keep only the model inputs: prepare.py also writes text and an unpadded loss_mask, which
+            # DataCollatorWithPadding cannot batch.
+            train_ds_list[i] = train_ds_list[i].remove_columns(
+                [c for c in ("text", "loss_mask") if c in train_ds_list[i].column_names])
         length_after_filter = sum(len(ds) for ds in train_ds_list)
         message = f'[process_dataset.py] Filtered for items with sequence length <= {max_length}, Percent kept: {length_after_filter / max(1.0, length_before_filter)}'
     return train_ds_list, message

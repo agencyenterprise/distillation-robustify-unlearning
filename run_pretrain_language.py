@@ -327,9 +327,10 @@ def launch_pretrain(setup_id):
         device           = setups[setup_id]['device'],
         batch_size       = setups[setup_id]['batch_size'],
         gradient_accumulation_steps = setups[setup_id]['gradient_accumulation_steps'],
-        # Upstream passed truncate=False, which train() does not accept. We pack into full
-        # 2048-token sequences, as every later stage (unlearn, distill, relearn) does.
-        join_or_subsequence = setups[setup_id].get('join_or_subsequence', True),
+        # Upstream passed truncate=False, which train() does not accept. We read it as one document per
+        # padded row (join_or_subsequence=False). Packing instead gave ~3.6x fewer optimizer steps and a base
+        # ~0.7 nats worse than the paper's (AGI-2569, job 68508).
+        join_or_subsequence = setups[setup_id].get('join_or_subsequence', False),
         epochs           = setups[setup_id]['epochs'],
         learning_rate    = setups[setup_id]['learning_rate'],
         max_steps        = setups[setup_id]['max_steps'],   
