@@ -1,8 +1,9 @@
 #!/bin/bash
 #SBATCH --job-name=agi2569-relearn
 #SBATCH --wckey=gradient-routing
+#SBATCH --nodes=1
 #SBATCH --gpus=8
-#SBATCH --cpus-per-task=192
+#SBATCH --cpus-per-task=160
 #SBATCH --mem-per-gpu=96G
 #SBATCH --time=08:00:00
 #SBATCH --output=/mnt/polished-lake/home/allegralaro/agi-2569/logs/%x-%A_%a.out

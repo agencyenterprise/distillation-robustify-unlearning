@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=agi2569-pretrain
 #SBATCH --wckey=gradient-routing
+#SBATCH --nodes=1
 #SBATCH --gpus=4
 #SBATCH --cpus-per-task=96
 #SBATCH --mem-per-gpu=96G
