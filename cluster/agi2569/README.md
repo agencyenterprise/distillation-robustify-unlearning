@@ -26,57 +26,54 @@ Targets and definitions are in `analysis/agi2569/paper_targets.md`. Submit from 
 node, in tmux. Create the log directory first: Slurm does not create it, and a job whose log directory is
 missing fails without a message.
 
+The MaxEnt teacher is lr **8e-5**, the paper's (App. B.1 bold, App. C), not upstream's hard-coded 3e-5. It is
+`TEACHER_LR` in `src/utils/run_names.py`. Distillation, partial distillation, relearning, `aggregate.py` and
+`plot.py` take `--teacher_lr` (3e-5 reproduces upstream), and every path downstream of the teacher encodes it.
+
+Setup and data (68507, running) and pretraining (base 68508 and oracle 68509, held) are already submitted.
+
 ```bash
 mkdir -p /mnt/polished-lake/home/allegralaro/agi-2569/logs
 J=cluster/agi2569
 A="0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8"   # Fig 5 alphas (beta 0.1, seed 111)
-E="0.2 0.4 0.6 0.8"                   # Fig 5b alphas
+base=68508 oracle=68509               # pretraining: base (English + Korean), data-filtered oracle (English only)
 
-# 1. Environment and data (CPU only)
-setup=$(sbatch --parsable $J/setup.sbatch)
-data=$(sbatch --parsable -d afterok:$setup $J/data.sbatch)
-
-# 2. Pretraining, 4 GPUs each: base (English + Korean) and the data-filtered oracle (English only)
-base=$(sbatch --parsable -d afterok:$data $J/pretrain.sbatch gemma-2-0.1B_eng+kor)
-oracle=$(sbatch --parsable -d afterok:$data $J/pretrain.sbatch gemma-2-0.1B_eng)
-
-# 3. MaxEnt unlearning (lr 3e-5, 1 GPU), then full distillation (Fig 4, 4 GPUs)
+# 1. MaxEnt unlearning: upstream's 8-LR sweep (1e-5..8e-5, App. B.1), 1 GPU per LR on one 8-GPU node.
+#    The 8e-5 run is the teacher of everything below.
 unlearn=$(sbatch --parsable -d afterok:$base $J/unlearn.sbatch)
+
+# 2. Full distillation of the 8e-5 teacher into the random init (Fig 4), 4 GPUs
 distill=$(sbatch --parsable -d afterok:$unlearn $J/distill.sbatch)
 
-# 4. Partial distillation, arm A only, 4 GPUs per run (2 per node):
-#    fixed 500 steps at alpha 0.1-0.8 (the paper's relearn names), and upstream's early stop at the Fig 5b alphas
-fixed=$(sbatch --parsable -d afterok:$unlearn --array=0-1 $J/partial_distill.sbatch --arms A --alphas $A)
-early=$(sbatch --parsable -d afterok:$unlearn --array=0 $J/partial_distill.sbatch --arms A --alphas $E --stop_mode early)
+# 3. Partial distillation, arm A, upstream's early stop (English within 5% of the teacher; at most one epoch),
+#    alpha 0.1-0.8, 4 GPUs per run (2 per node)
+early=$(sbatch --parsable -d afterok:$unlearn --array=0-1 $J/partial_distill.sbatch --arms A --alphas $A --stop_mode early)
 
-# 5. Relearning, 500 steps on Korean x 10 attacker LRs, 1 GPU per run:
-#    references (base, data-filtered, MaxEnt-unlearned, full-distilled), then arm A
+# 4. Relearning, 500 steps on Korean x 10 attacker LRs, 1 GPU per run:
+#    references (base, data-filtered, MaxEnt 8e-5, full distill), then arm A
 sbatch -d afterok:$oracle:$distill --array=0 $J/relearn.sbatch --groups refs
-sbatch -d afterok:$fixed --array=0-1 $J/relearn.sbatch --groups partial --arms A --alphas $A
-sbatch -d afterok:$early --array=0 $J/relearn.sbatch --groups partial --arms A --alphas $E --stop_modes early
+sbatch -d afterok:$early --array=0-1 $J/relearn.sbatch --groups partial --arms A --alphas $A --stop_modes early
 
-# 6. After each phase (light; login node is fine)
+# 5. After each phase (light; login node is fine)
 bash $J/sync_s3.sh            # records + logs
 bash $J/sync_s3.sh --models   # once the reference models exist
 ```
 
-Then compare with the paper, locally: `python analysis/agi2569/plot.py <records> --paper` (fixed steps, x-axis =
-alpha), and `... --paper --stop early_stop` (Fig 5a axes).
+Then compare with the paper, locally: `python analysis/agi2569/aggregate.py <records>` (prints the MaxEnt sweep
+against App. B.1, then the robustness tables) and `python analysis/agi2569/plot.py <records> --paper` (Fig 4b,
+Fig 5a axes, Fig 5b).
 
 Calibration checks, in order:
 1. Base English and Korean losses: 4.94 and 3.47.
-2. MaxEnt final losses against App. B.1's row for lr 3e-5.
+2. MaxEnt final losses at all 8 LRs against App. B.1 (`maxent_sweep.csv`); 8e-5 should give 4.99 / 12.38.
 3. Full distillation length: about 807 steps.
 4. The Fig 4b curves.
 5. The Fig 5b curves and the Fig 5a points.
 
-If the references miss, the first suspect is the teacher LR: the paper reports 8e-5 (see `paper_targets.md`).
-An 8-LR unlearning sweep (`sbatch --gpus=8 $J/unlearn.sbatch --lrs 1e-5 2e-5 3e-5 4e-5 5e-5 6e-5 7e-5 8e-5`)
-costs about 3 GPU-h and checks every row of App. B.1.
-
 Jobs over the 16-GPU weekday cap wait in the queue; Slurm paces them. Preview a relearn list with `--list`.
 Reruns are safe: finished runs are skipped, and a crashed run restarts from scratch with its partial record
-removed. A partial-distill sweep job exits non-zero if any of its runs failed, so `afterok` dependents wait.
+removed. The unlearning job and each partial-distill sweep job exit non-zero if any of their runs failed, so
+`afterok` dependents wait.
 
 ## Phase 2: arms B-F (only after Phase 1 matches)
 
@@ -98,7 +95,7 @@ App. E, and the code is upstream `edbf111`.
 | Stage | GPUs per run | Evidence |
 |---|---|---|
 | Pretraining | 4 | App. E: "Language ... pretraining took 4xH200". Batch 5 x 80 per process (Table 2), so 1600 sequences per step. |
-| MaxEnt unlearning | 1 | `run_unlearn_language.py:312` runs one process per GPU. The paper does not say otherwise. |
+| MaxEnt unlearning | 1 | `run_unlearn_language.py:312` runs one process per GPU; the 8-LR sweep packs one node. The paper does not say otherwise. |
 | Full distillation (Fig 4) | 4 | App. E: "All distillation and UNDO runs for language are run on 4xH200 GPUs". Fig 9: the language distillations ran 807 steps, which is one epoch at 4 x 4 x 60 = 960 sequences per step. On 1 GPU the 1000-step cap would stop them at about a third of an epoch. `src/tools/distill.py:271` logs a per-process step. |
 | Partial distillation (UNDO) | 4 | App. E (as above). Header of `run_partial_distill_language.py:2`: "Configured for a 4xH200 GPU server". The sweep calls `accelerate launch` with the machine's default config (`:193`). `src/utils/parallel_launch.py:9-41` launches `--multi_gpu --num_processes 4` per run. |
 | Relearning | 1 | App. E: "relearning took one H200 GPU per setup"; `run_relearn_language.py:197` runs one process per GPU. Table 4: batch 8, about 8M tokens per run. |
@@ -137,17 +134,21 @@ code audit. Check the first run of each kind and update. App. E reports two to t
 | setup, data | CPU only | 0 | ~1 h, ~4-8 h |
 | pretrain base (2B tokens) | 4 GPUs | 6-12 | 2-3 h |
 | pretrain oracle (1B tokens) | 4 GPUs | 3-6 | 1-2 h |
-| unlearn MaxEnt, one LR | 1 GPU | 0.3 | 20 min |
+| unlearn MaxEnt, one LR (8 per node) | 1 GPU | 0.3 | 20 min |
 | full distill (~807 steps x 960 seqs, ~1.6B tokens) | 4 GPUs | 8-16 | 2-4 h |
 | partial, fixed 500 steps (0.98B tokens) | 4 GPUs | 3.2 (CE) - 4.4 (KL) | ~1-1.2 h |
-| partial, early stop | 4 GPUs | 4.4 (KL) x steps / 500 | |
+| partial, early stop | 4 GPUs | 4.4 (KL) x steps / 500, plus loading and evaluation | 1.1 h x steps / 500 |
 | relearn, one (model, LR) | 1 GPU | 0.25 | 15 min |
 
 | Program | GPU-h |
 |---|---|
-| **Phase 1**: pretrain 9-18, unlearn 0.3, full distill 8-16, arm A fixed 8 x 4.4 = 35, arm A early (~1200 steps over 4 runs) ~10, relearn 16 models x 10 LRs x 0.25 = 40 | **~100-120** (~1.5 days wall, including data) |
+| **Phase 1**: pretrain 9-18 (submitted), unlearn sweep 8 x 0.3 = ~3, full distill 8-16, arm A early stop at 8 alphas ~30, relearn 12 models x 10 LRs x 0.25 = 30 | **~80-100** (~70-80 after pretraining; ~6-8 h wall after the base model) |
 | Phase 2, fixed: arms B-F at alpha 0.0-0.8, D/E with both target kinds (63 runs, ~215) + relearn (630 x 0.25 = ~160) | ~375 |
 | Phase 2, arm C early stop: 9 runs (~15) + relearn (90 x 0.25) | ~40 |
+
+Arm A early stop: the paper's stopping steps (Fig 5a) sum to about 1,950. Two array tasks hold a full node each
+while their two lanes drain (task 0: alpha 0.1/0.3/0.5/0.7, ~580 steps of wall; task 1: 0.2/0.4/0.6/0.8, ~770),
+so about 2 x 8 GPUs x 1.5-2 h = ~30 GPU-h. If every run hits the one-epoch cap (~807 steps), ~60.
 
 Relearning cost is mostly validation (every 5 steps, ~1M tokens), so trimming the attacker LR grid (`--lrs`)
 cuts it proportionally.

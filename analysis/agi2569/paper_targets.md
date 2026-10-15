@@ -47,7 +47,8 @@ in percent. The full curves are in `paper_targets.json`, which `plot.py --paper`
 | Random-init loss | ~12.5 | Fig 9 |
 
 The App. B.1 sweep gives final English / Korean losses for all eight MaxEnt LRs (1e-5 to 8e-5). They are in
-`paper_targets.json` under `scalars.maxent_final`, and they check pretraining and unlearning together.
+`paper_targets.json` under `scalars.maxent_final`, and they check pretraining and unlearning together. Phase 1 runs
+the same sweep; `aggregate.py` compares it row by row (`maxent_sweep.csv`).
 
 ## Fig 4b: MaxEnt, language. Worst-case Korean loss during relearning
 
@@ -94,14 +95,14 @@ compute.
 ## Discrepancies to keep in mind
 
 - **Teacher LR.** App. C and the bold entry in App. B.1 give MaxEnt lr **8e-5** for language. Upstream code hard-codes
-  3e-5 (`run_partial_distill_language.py`, `run_distill_language.py`, `run_relearn_language.py`), and we use 3e-5.
-  Fig 4b's unlearned model starts relearning at Korean 12.33, which matches 8e-5 (12.38) and not 3e-5 (11.98).
-  If our 3e-5 references miss Fig 4, the teacher LR is the first suspect. App. B.1 makes it cheap to tell: an
-  8-LR unlearning sweep costs about 3 GPU-h.
+  3e-5 (`run_partial_distill_language.py`, `run_distill_language.py`, `run_relearn_language.py`). Fig 4b's unlearned
+  model starts relearning at Korean 12.33, which matches 8e-5 (12.38) and not 3e-5 (11.98). We use 8e-5
+  (`TEACHER_LR` in `src/utils/run_names.py`); `--teacher_lr 3e-5` reproduces upstream, under separate paths.
 - **Unlearn-only endpoint.** Fig 4b's worst case ends at 3.48 and Fig 5b's at 3.496, so the two figures likely come
   from different runs. Both are close to the base model's Korean loss of 3.467.
 - **Fixed 500 steps vs early stop.** Fig 5 used early stopping. Fixed 500-step runs on 4 GPUs (0.98B tokens) train
   longer than the paper's early stop for alpha ≤ 0.7 (about 1 to 470 steps) and shorter for alpha 0.8 (about 620
-  steps). Only the early-stop runs are a like-for-like comparison with Fig 5.
+  steps). Only the early-stop runs are a like-for-like comparison with Fig 5, so Phase 1 runs only those; fixed
+  mode stays in the code.
 - **Pretraining cost.** App. E reports two to three days on 4xH200 for pretraining. Our FLOP estimate is a few hours.
   Check the first pretraining log's throughput before trusting the estimate.

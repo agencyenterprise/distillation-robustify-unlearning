@@ -2,15 +2,15 @@
 Fig 4 and Fig 5 style plots for AGI-2569, one curve per arm.
 
     python analysis/agi2569/plot.py <local_records dir> [--out <dir>] [--definition min_final|min_any_step]
-                                    [--stop fixed_steps_500|early_stop] [--compute steps|flops|tokens] [--paper]
+                                    [--stop early_stop|fixed_steps_500] [--compute steps|flops|tokens] [--paper]
                                     [--teacher_lr 8e-5]
 
 fig4_relearning.png  Attacker's envelope (min over LRs at each step) of Korean loss during relearning, for the
                      reference models and each arm at alpha = 0 (arm C at alpha 0 = "unlearn, then fine-tune on
                      English", the extra curve the plan asks for).
 fig5_robustness.png  Normalised robustness vs compute ratio to data filtering, one line per arm over alpha.
-                     Fixed-step runs all cost the same, so for them (the default --stop) the x-axis is alpha;
-                     pass --stop early_stop --compute steps for the paper's robustness-vs-compute view (Fig 5a).
+                     Early-stop runs (the default --stop, as in Fig 5a) use the compute ratio as x-axis.
+                     Fixed-step runs all cost the same, so with --stop fixed_steps_500 the x-axis is alpha.
 fig5b_relearning.png Attacker's envelope per alpha for arm A (--fig5b_arm) and the references (Fig 5b).
 
 --paper overlays the paper's language values (paper_targets.json; see paper_targets.md) as thin dashed lines
@@ -161,7 +161,7 @@ def main():
     parser.add_argument("records_root")
     parser.add_argument("--out", default="analysis/agi2569/out")
     parser.add_argument("--definition", choices=["min_final", "min_any_step"], default="min_final")
-    parser.add_argument("--stop", default="fixed_steps_500")
+    parser.add_argument("--stop", default="early_stop")
     parser.add_argument("--teacher_lr", type=float, default=TEACHER_LR, help="MaxEnt teacher LR (default 8e-5)")
     parser.add_argument("--compute", choices=["steps", "flops", "tokens"], default="steps")
     parser.add_argument("--filter_tokens", type=float, default=None)
