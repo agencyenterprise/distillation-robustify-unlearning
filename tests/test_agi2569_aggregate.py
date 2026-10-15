@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(ROOT, "analysis", "agi2569"))
 import aggregate  # noqa: E402
 import plot  # noqa: E402
 from src.utils.run_names import (  # noqa: E402
-    REFERENCE_MODELS, TEACHER_LR, partial_distill_name, reference_models, relearn_record_dir,
+    REFERENCE_MODELS, TEACHER_LR, partial_distill_name, reference_models, relearn_record_dir, unlearned_model,
 )
 
 
@@ -126,3 +126,18 @@ def test_other_teacher_lr_kept_apart(records):
     # unlearn ref 1.0 (min_any_step), filter 6.0: (5 - 1) / (6 - 1)
     assert row(summary3, "A", "min_any_step").robustness == pytest.approx(0.8)
 
+
+def test_maxent_sweep_check(tmp_path):
+    root = str(tmp_path)
+    write(f"{root}/{unlearned_model(8e-5)}.txt", [
+        {"val/eng_ce_loss": 4.9, "val/kor_ce_loss": 3.5, "train/step": 0},
+        {"train/loss": 1.0, "train/step": 100},
+        {"val/eng_ce_loss": 5.1, "val/kor_ce_loss": 12.0, "train/step": 100},
+        {"val/eng_ce_loss": 5.0, "val/kor_ce_loss": 12.5, "train/step": 100},   # final validation
+    ])
+    sweep = aggregate.maxent_sweep_check(root).set_index("lr")
+    assert len(sweep) == 8
+    assert sweep.loc[8e-5, "eng_loss"] == 5.0
+    assert sweep.loc[8e-5, "kor_diff"] == pytest.approx(12.5 - 12.3808)
+    assert sweep.loc[3e-5, "paper_kor_loss"] == 11.9844
+    assert sweep.loc[3e-5, "eng_loss"] != sweep.loc[3e-5, "eng_loss"]   # missing record -> nan

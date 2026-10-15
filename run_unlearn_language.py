@@ -300,7 +300,7 @@ def launch_unlearning_run(setup_id):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    # AGI-2569 needs only the UNDO teacher: --methods MaxEnt --lrs 3e-5
+    # AGI-2569: --methods MaxEnt runs the 8-LR sweep of App. B.1; the UNDO teacher is lr 8e-5 (run_names.TEACHER_LR)
     parser.add_argument('--methods', nargs='+', default=list(LR_RANGES), choices=list(LR_RANGES))
     parser.add_argument('--lrs', nargs='+', type=float, default=None, help='Default: each method\'s full LR_RANGES sweep')
     args = parser.parse_args()
@@ -322,3 +322,7 @@ if __name__ == "__main__":
     parallel_fn = get_parallel_launch_wrapper(launch_unlearning_run)
     # calls run_experiment in parallel on a separate gpu for each experiment setup when a gpu is free
     launch_in_parallel_one_per_gpu(experiment_list=experiments, experiment_fn=parallel_fn)
+    # The launcher ignores child failures; exit non-zero so Slurm afterok dependents wait.
+    missing = [s for s in SETUPS_TO_RUN if not os.path.exists(os.path.join(setups[s]['output_dir'], 'final_model', 'config.json'))]
+    if missing:
+        sys.exit(f"{len(missing)} of {len(SETUPS_TO_RUN)} unlearning runs have no final_model: {missing}")

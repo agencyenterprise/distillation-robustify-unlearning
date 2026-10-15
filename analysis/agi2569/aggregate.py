@@ -25,6 +25,8 @@ Definitions
   the same number of steps as pretraining (~806 in the paper; see paper_targets.md). It needs both runs on the
   same GPU geometry (4 GPUs, 960 sequences per step).
 - The paper's robustness uses the worst-case curve's value at the last step, which is `min_final`.
+- MaxEnt sweep check (`maxent_sweep_check`, maxent_sweep.csv): final English / Korean validation loss of each
+  unlearning LR against App. B.1's table (paper_targets.json, scalars.maxent_final).
 """
 import argparse
 import json
@@ -35,7 +37,7 @@ import sys
 import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-from src.utils.run_names import TEACHER_LR, lr_tag, reference_models, relearn_record_dir  # noqa: E402
+from src.utils.run_names import TEACHER_LR, lr_tag, reference_models, relearn_record_dir, unlearned_model  # noqa: E402
 
 DEFINITIONS = ("min_any_step", "min_final")
 KL_ARMS = ("A", "B")
@@ -43,6 +45,7 @@ PARTIAL_RE = re.compile(
     r"partial_distill-teacher_lr_(?P<teacher_lr>[\d.e+-]+)-arm_(?P<arm>[A-F](?:_uniform|_unigram)?)"
     r"-alpha_(?P<alpha>[\d.]+)-beta_(?P<beta>[\d.]+)-seed_(?P<seed>\d+)-(?P<stop>fixed_steps_\d+|early_stop)$"
 )
+PAPER_TARGETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "paper_targets.json")
 
 
 def read_jsonl(path):
@@ -173,6 +176,22 @@ def aggregate(records_root, filter_tokens=None, filter_steps=None, teacher_lr=TE
     return curves, summary
 
 
+def maxent_sweep_check(records_root, paper_path=PAPER_TARGETS):
+    """Our final English / Korean loss per MaxEnt LR against App. B.1. One row per LR in the paper's table."""
+    with open(paper_path, encoding="utf-8") as f:
+        paper = json.load(f)["scalars"]["maxent_final"]
+    rows = []
+    for lr_key, (paper_eng, paper_kor) in paper.items():
+        path = os.path.join(records_root, unlearned_model(float(lr_key)) + ".txt")
+        vals = [r for r in read_jsonl(path) if "val/kor_ce_loss" in r] if os.path.exists(path) else []
+        last = vals[-1] if vals else {}   # the final validation, written after training ends
+        eng, kor = last.get("val/eng_ce_loss", float("nan")), last.get("val/kor_ce_loss", float("nan"))
+        rows.append({"lr": float(lr_key), "eng_loss": eng, "paper_eng_loss": paper_eng, "eng_diff": eng - paper_eng,
+                     "kor_loss": kor, "paper_kor_loss": paper_kor, "kor_diff": kor - paper_kor,
+                     "step": last.get("train/step", float("nan"))})
+    return pd.DataFrame(rows)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("records_root", help="local copy of {MODEL_DIR}/local_records")
@@ -185,6 +204,10 @@ def main():
                         help="override the steps-axis denominator (default: full distillation's steps; paper ~806)")
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
+    sweep = maxent_sweep_check(args.records_root)
+    sweep.to_csv(os.path.join(args.out, "maxent_sweep.csv"), index=False)
+    print("== MaxEnt unlearning: final losses vs App. B.1 ==")
+    print(sweep.to_string(index=False, float_format=lambda x: f"{x:.4f}"))
     curves, summary = aggregate(args.records_root, args.filter_tokens, args.filter_steps, args.teacher_lr)
     curves.to_csv(os.path.join(args.out, "relearn_curves.csv"), index=False)
     worst_case_curve(curves).to_csv(os.path.join(args.out, "relearn_envelope.csv"), index=False)
@@ -194,7 +217,7 @@ def main():
     for definition in DEFINITIONS:
         print(f"\n== worst case: {definition} ==")
         print(summary[summary.definition == definition][cols].sort_values(["role", "arm", "alpha"]).to_string(index=False))
-    print(f"\nWrote {args.out}/summary.csv, relearn_curves.csv, relearn_envelope.csv")
+    print(f"\nWrote {args.out}/summary.csv, relearn_curves.csv, relearn_envelope.csv, maxent_sweep.csv")
 
 
 if __name__ == "__main__":
