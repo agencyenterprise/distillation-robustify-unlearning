@@ -14,9 +14,12 @@ early-stop condition, and never run during training.
 Stopping: --stop_mode fixed_steps (default; --fixed_steps 500, as in the paper's relearn model names)
 or --stop_mode early (upstream: stop once English validation loss is within 5% of the teacher's).
 
-Launch Command (Single):     accelerate launch run_partial_distill_language.py --arm C --alpha 0.3 --beta 0.1 --seed 111
-Launch Command (Sweep):      python run_partial_distill_language.py --run_all --arms A B C
-Launch Command (One per GPU): python run_partial_distill_language.py --run_all --one_per_gpu --arms D --kor_targets unigram
+GPUs: the paper ran every language UNDO run on 4 H200s (arXiv 2506.06278, App. E): per-process batch 4 x 60
+accumulation, so 960 sequences per optimizer step. --gpus_per_run 4 reproduces this; the step and schedule
+code is upstream's, and under 4 processes it behaves as upstream's did (see cluster/agi2569/README.md).
+
+Launch Command (Single):     accelerate launch --multi_gpu --num_processes 4 run_partial_distill_language.py --arm C --alpha 0.3 --beta 0.1 --seed 111
+Launch Command (Sweep):      python run_partial_distill_language.py --run_all --gpus_per_run 4 --arms A --alphas 0.1 0.2
 """
 
 from src.tools.partial_distill_langarith import partial_distill
@@ -28,7 +31,7 @@ from src.utils.run_names import (
 from accelerate import Accelerator
 from utils.loss_functions import print_acc, custom_login
 from src.utils.validation_functions import get_korean_and_english_evalaution_fn
-from utils.parallel_launch import launch_in_parallel_one_per_gpu, get_parallel_launch_wrapper
+from utils.parallel_launch import launch_in_parallel_accelerate_groups
 import argparse
 import os
 import subprocess
@@ -167,17 +170,18 @@ def run_experiment(setup_id, alpha, beta, seed=None, arm='A', kor_targets='unifo
     if accelerator.is_main_process and os.path.exists(current_setup['path_local_record']):
         os.remove(current_setup['path_local_record'])
 
-    # Get evaluation function for Korean and English
-    eval_fn = get_korean_and_english_evalaution_fn(
-        model_name=current_setup['student_model_name'],
-        max_length=current_setup['max_length'],
-        eng_valid_file=current_setup['eng_valid_file'],
-        kor_valid_file=current_setup['kor_valid_file'],
-        dataset_cache_dir=current_setup['dataset_cache_dir'],
-        cache_dir=current_setup['cache_dir'],
-        batch_size=current_setup['batch_size'],
-        accelerator=accelerator
-    )
+    # Get evaluation function for Korean and English (rank 0 builds the datasets cache first)
+    with accelerator.main_process_first():
+        eval_fn = get_korean_and_english_evalaution_fn(
+            model_name=current_setup['student_model_name'],
+            max_length=current_setup['max_length'],
+            eng_valid_file=current_setup['eng_valid_file'],
+            kor_valid_file=current_setup['kor_valid_file'],
+            dataset_cache_dir=current_setup['dataset_cache_dir'],
+            cache_dir=current_setup['cache_dir'],
+            batch_size=current_setup['batch_size'],
+            accelerator=accelerator
+        )
 
     domains = arm_config['domains']
     partial_distill(
@@ -272,10 +276,13 @@ def run_all_experiments(args):
     print(f"Running {len(experiments)} experiments (shard {args.shard}/{args.num_shards})")
     print(f"Arms: {args.arms}, alphas: {alphas}, betas: {args.betas}, seeds: {args.seeds}, stop: {args.stop_mode}")
 
-    if args.one_per_gpu:
-        # One single-process run per GPU, queued until all are done.
-        parallel_fn = get_parallel_launch_wrapper(run_experiment)
-        launch_in_parallel_one_per_gpu(experiment_list=experiments, experiment_fn=parallel_fn)
+    if args.gpus_per_run:
+        # One accelerate launch per run on its own group of GPUs (2 runs per 8-GPU node at 4 GPUs per run).
+        port_base = 29500 + 8 * (int(os.environ.get("SLURM_JOB_ID", 0)) % 400)
+        failed = launch_in_parallel_accelerate_groups(
+            [experiment_cli_args(e) for e in experiments], sys.argv[0], args.gpus_per_run, port_base)
+        if failed:
+            sys.exit(f"{failed} of {len(experiments)} runs failed")
         return
 
     # Run all experiments
@@ -311,14 +318,18 @@ if __name__ == "__main__":
     parser.add_argument('--kor_targets', choices=KOR_TARGETS, default='uniform', help='Arms D/E: random Korean targets')
     parser.add_argument('--stop_mode', choices=STOP_MODES, default='fixed_steps')
     parser.add_argument('--fixed_steps', type=int, default=FIXED_STEPS)
-    parser.add_argument('--max_steps', type=int, default=None, help='early mode only: cap on optimizer steps')
+    parser.add_argument('--max_steps', type=int, default=None,
+                        help='early mode only: cap on optimizer steps. Like upstream max_steps it also shortens the '
+                             'cosine schedule, so leave it unset to match the paper (an epoch is the cap there)')
     parser.add_argument('--run_all', action='store_true', help='Run all experiments in the sweep')
     parser.add_argument('--start_alpha', type=float, default=None, help='Alpha value to start from (inclusive)')
     parser.add_argument('--arms', nargs='+', choices=ARMS, default=['A'], help='Sweep: arms')
     parser.add_argument('--alphas', nargs='+', type=float, default=SWEEP_ALPHAS, help='Sweep: alphas')
     parser.add_argument('--betas', nargs='+', type=float, default=SWEEP_BETAS, help='Sweep: betas')
     parser.add_argument('--seeds', nargs='+', type=int, default=SWEEP_SEEDS, help='Sweep: seeds')
-    parser.add_argument('--one_per_gpu', action='store_true', help='Sweep: one single-GPU run per visible GPU')
+    parser.add_argument('--gpus_per_run', type=int, default=None,
+                        help='Sweep: run each experiment as its own accelerate launch on this many GPUs, packing '
+                             'the visible GPUs (4 = the paper). Unset: one run at a time with the default config')
     parser.add_argument('--shard', type=int, default=0, help='Sweep: run every num_shards-th experiment from here')
     parser.add_argument('--num_shards', type=int, default=1)
     args = parser.parse_args()
@@ -339,5 +350,5 @@ if __name__ == "__main__":
         print("\nExamples:")
         print("  # Run a single experiment directly:")
         print("  accelerate launch run_partial_distill_language.py --arm A --alpha 0.3 --beta 0.1 --seed 111")
-        print("  # Run a sweep, one run per GPU:")
-        print("  python run_partial_distill_language.py --run_all --one_per_gpu --arms A B C D")
+        print("  # Run a sweep, 4 GPUs per run:")
+        print("  python run_partial_distill_language.py --run_all --gpus_per_run 4 --arms A B C D")

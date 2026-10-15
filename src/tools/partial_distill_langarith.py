@@ -157,32 +157,33 @@ def partial_distill(
     # ----------------------------------------------------------------
     # Load distillation dataset
     # ----------------------------------------------------------------
-    train_ds_list = []
-    for file in train_files:
-        print_acc(f"[distill.py] Loading train dataset from {file}", print_message)
-        train_ds = load_dataset("json", data_files=file, split="train", cache_dir=dataset_cache_dir)
-        train_ds_list.append(train_ds)
-    # ------------------------------------------------------------
-    # PROCESS FOR SEQUENCE LENGTH
-    # If join_or_subsequence, form sequences of exactly max_length 
-    # by joining multiple or using subsequences
-    # else filter for only those less than max_length
-    # ------------------------------------------------------------
-    train_ds_list, message = make_sequence_length(train_ds_list=train_ds_list, tokenizer=tokenizer, max_length=max_length, join_or_subsequence=join_or_subsequence)
-    print_acc(message, print_message)
-    # Tag each row with its source file, so the loop can pick targets and log loss per domain.
-    train_ds_list = [ds.add_column("domain", [i] * len(ds)) for i, ds in enumerate(train_ds_list)]
+    # Rank 0 builds the datasets cache first; the other ranks then read it instead of racing to write it.
+    with accelerator.main_process_first():
+        train_ds_list = []
+        for file in train_files:
+            print_acc(f"[distill.py] Loading train dataset from {file}", print_message)
+            train_ds = load_dataset("json", data_files=file, split="train", cache_dir=dataset_cache_dir)
+            train_ds_list.append(train_ds)
+        # ------------------------------------------------------------
+        # PROCESS FOR SEQUENCE LENGTH
+        # If join_or_subsequence, form sequences of exactly max_length 
+        # by joining multiple or using subsequences
+        # else filter for only those less than max_length
+        # ------------------------------------------------------------
+        train_ds_list, message = make_sequence_length(train_ds_list=train_ds_list, tokenizer=tokenizer, max_length=max_length, join_or_subsequence=join_or_subsequence)
+        print_acc(message, print_message)
+        # Tag each row with its source file, so the loop can pick targets and log loss per domain.
+        train_ds_list = [ds.add_column("domain", [i] * len(ds)) for i, ds in enumerate(train_ds_list)]
 
 
-
-   # Interleave dataset
-    if len(train_ds_list) == 0:
-        raise ValueError("No training dataset provided!")
-    elif len(train_ds_list) == 1:
-        train_ds = train_ds_list[0]
-    else:
-        print_acc(f"[serum_original.py] Interleaving with probabilities: {interleave_probs}", print_message)
-        train_ds = interleave_datasets(train_ds_list, probabilities=interleave_probs, seed=seed, stopping_strategy=stopping_strategy)
+        # Interleave dataset
+        if len(train_ds_list) == 0:
+            raise ValueError("No training dataset provided!")
+        elif len(train_ds_list) == 1:
+            train_ds = train_ds_list[0]
+        else:
+            print_acc(f"[serum_original.py] Interleaving with probabilities: {interleave_probs}", print_message)
+            train_ds = interleave_datasets(train_ds_list, probabilities=interleave_probs, seed=seed, stopping_strategy=stopping_strategy)
 
     # Print size
     print_acc(f"[serum_original.py] Train dataset size: {len(train_ds)}", print_message)

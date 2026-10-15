@@ -90,6 +90,47 @@ def launch_in_parallel_one_per_four_gpus(experiment_list, experiment_fn):
     
     print("All experiments completed!")
 
+def gpu_groups(gpus_per_run, visible=None):
+    """Split the visible GPUs (CUDA_VISIBLE_DEVICES, else all) into disjoint groups of gpus_per_run."""
+    if visible is None:
+        env = os.environ.get("CUDA_VISIBLE_DEVICES")
+        visible = env.split(",") if env else [str(i) for i in range(torch.cuda.device_count())]
+    groups = [visible[i:i + gpus_per_run] for i in range(0, len(visible) - gpus_per_run + 1, gpus_per_run)]
+    if not groups:
+        raise RuntimeError(f"Need {gpus_per_run} GPUs per run, have {len(visible)}: {visible}")
+    return groups
+
+
+def launch_in_parallel_accelerate_groups(cli_args_list, script, gpus_per_run, port_base=29500):
+    """
+    Generalises launch_in_parallel_one_per_four_gpus: each run is
+    `accelerate launch --multi_gpu --num_processes gpus_per_run <script> <args>` on its own group of GPUs,
+    queued until all runs are done. Returns the number of failed runs.
+    """
+    groups = gpu_groups(gpus_per_run)
+    queue = list(cli_args_list)
+    running, failed = {}, 0
+    print(f"{len(queue)} runs on GPU groups {groups}", flush=True)
+    while queue or running:
+        for g, group in enumerate(groups):
+            if g in running and running[g][0].poll() is not None:
+                proc, args = running.pop(g)
+                if proc.returncode != 0:
+                    failed += 1
+                    print(f"FAILED (exit {proc.returncode}) on GPUs {group}: {args}", flush=True)
+            if g not in running and queue:
+                args = queue.pop(0)
+                multi = ["--multi_gpu"] if gpus_per_run > 1 else []
+                cmd = [sys.executable, "-m", "accelerate.commands.launch", *multi, "--num_processes", str(gpus_per_run),
+                       "--mixed_precision", "bf16", "--main_process_port", str(port_base + g), script, *args]
+                env = {**os.environ, "CUDA_VISIBLE_DEVICES": ",".join(group)}
+                print(f"Starting on GPUs {group}: {args}", flush=True)
+                running[g] = (subprocess.Popen(cmd, env=env), args)
+        time.sleep(5)
+    print(f"All runs completed; {failed} failed.", flush=True)
+    return failed
+
+
 def launch_in_parallel_one_per_gpu(experiment_list, experiment_fn):
         mp.set_start_method('spawn')
         num_gpus = torch.cuda.device_count()
