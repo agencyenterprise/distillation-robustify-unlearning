@@ -72,20 +72,81 @@ Calibration checks, in order:
 
 Jobs over the 16-GPU weekday cap wait in the queue; Slurm paces them. Preview a relearn list with `--list`.
 Reruns are safe: finished runs are skipped, and a crashed run restarts from scratch with its partial record
-removed. The unlearning job and each partial-distill sweep job exit non-zero if any of their runs failed, so
-`afterok` dependents wait.
+removed. The unlearning, partial-distill and relearn jobs exit non-zero if any of their runs failed, so `afterok`
+dependents wait.
 
-## Phase 2: arms B-F (only after Phase 1 matches)
+## Phase 2, Wave 1: arms B, C, D
+
+Approved after calibration: arms B, C and D (uniform Korean targets) at alpha 0.1-0.8 with upstream's early stop, as
+arm A in Phase 1 (teacher lr 8e-5, beta 0.1, seed 111), plus arm C at alpha 0 in epoch mode, "unlearn, then CE
+fine-tune on English" (the extra Fig 4 curve; early stop would end it at step 1). Then relearning on each, validating
+every 25 steps instead of 5. One run per array task. The job shapes on the command line override the sbatch
+defaults.
 
 ```bash
-partial=$(sbatch --parsable --array=0-3 $J/partial_distill.sbatch --arms B C D E F --alphas 0.0 $A)
-unigram=$(sbatch --parsable --array=0-1 $J/partial_distill.sbatch --arms D E --kor_targets unigram --alphas 0.0 $A)
-sbatch -d afterok:$partial:$unigram --array=0-7 $J/relearn.sbatch --groups partial --arms B C D E F --kor_targets uniform unigram
-sbatch --array=0-1 $J/partial_distill.sbatch --arms C --stop_mode early   # the paper's compute axis
+mkdir -p /mnt/polished-lake/home/allegralaro/agi-2569/logs
+J=cluster/agi2569
+A="0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8"
+PD="--gpus=4 --cpus-per-task=80 --mem-per-gpu=96G"   # one partial-distill run per task: half a node
+RL="--gpus=1 --cpus-per-task=20 --mem-per-gpu=96G"   # one relearn run per task
+
+# 0. Datasets caches, built once on CPU before the arrays fan out (loads only, if calibration's caches are intact)
+warm_pd=$(sbatch --parsable $J/warm_cache.sbatch run_partial_distill_language.py --arms B C D)
+warm_rl=$(sbatch --parsable $J/warm_cache.sbatch run_relearn_language.py)
+
+# 1. Partial distillation, early stop, alpha 0.1-0.8 (task i = alpha i)
+pd_b=$(sbatch --parsable -d afterok:$warm_pd $PD --time=03:30:00 --array=0-7 $J/partial_distill.sbatch --arms B --alphas $A --stop_mode early)
+pd_c=$(sbatch --parsable -d afterok:$warm_pd $PD --time=03:00:00 --array=0-7 $J/partial_distill.sbatch --arms C --alphas $A --stop_mode early)
+pd_d=$(sbatch --parsable -d afterok:$warm_pd $PD --time=04:30:00 --array=0-7 $J/partial_distill.sbatch --arms D --kor_targets uniform --alphas $A --stop_mode early)
+
+# 2. Arm C at alpha 0, 2 epochs of English (see the note below)
+pd_c0=$(sbatch --parsable -d afterok:$warm_pd $PD --time=06:00:00 --array=0 $J/partial_distill.sbatch --arms C --alphas 0.0 --stop_mode epoch --epochs 2)
+
+# 3. Relearning, 10 attacker LRs per model, validation every 25 steps (8 alphas: task i = LR i // 8, alpha i % 8)
+sbatch -d afterok:$warm_rl:$pd_b $RL --time=01:00:00 --array=0-79 $J/relearn.sbatch --groups partial --arms B --alphas $A --stop_modes early --eval_every 25
+sbatch -d afterok:$warm_rl:$pd_c $RL --time=01:00:00 --array=0-79 $J/relearn.sbatch --groups partial --arms C --alphas $A --stop_modes early --eval_every 25
+sbatch -d afterok:$warm_rl:$pd_d $RL --time=01:00:00 --array=0-79 $J/relearn.sbatch --groups partial --arms D --kor_targets uniform --alphas $A --stop_modes early --eval_every 25
+sbatch -d afterok:$warm_rl:$pd_c0 $RL --time=01:00:00 --array=0-9 $J/relearn.sbatch --groups partial --arms C --alphas 0.0 --stop_modes epoch --epochs 2 --eval_every 25
+
+# 4. When done
+bash $J/sync_s3.sh
 ```
 
-Arm C at alpha 0.0 ("unlearn, then fine-tune on English") is the extra Fig 4 curve. At alpha 0.0, arms A and B are
-no-ops.
+Runs: 25 partial distillations (100 GPUs over 25 tasks), then 250 relearns. Every partial-distill and relearn
+job exits non-zero if any of its runs failed or (relearning) has no record reaching step 500, so `afterok`
+dependents wait. Rerunning a block line is safe: finished runs are skipped.
+
+**Epoch length of the arm C alpha 0 run.** Full distillation's 808 steps are one epoch of English + Korean
+interleaved (~775K packed rows at 960 per step). Arm C trains on English only, so one epoch is about half that:
+~404 steps if English is the smaller packed set, at most ~509 (all 1B tokens, which packing does not keep).
+`--epochs 2` gives ~808-1,018 steps, the closest to full distillation's step budget, and sees each English row twice;
+`--epochs 1` sees each once, the English that full distillation saw. The partial-distill warm job prints the packed
+English row count (`eng, seed 111, N rows`): steps per epoch = N / 960. The epoch count is in the run name
+(`epochs_2`), so the two never collide.
+
+**Time limits**, from calibration (arm A early stop: about 17 s per optimizer step on 4 GPUs, all in, from 2 min at
+alpha 0.1 to 3 h 51 min for 800 steps at alpha 0.8; full distillation 808 steps in 4 h 26 min). CE arms skip the
+teacher forward pass, so perhaps 13 s per step (unmeasured; the limits also hold at 17 s). Each limit covers the
+arm's one-epoch cap with a margin: B (KL, English only) <=509 steps, C <=509, D (English + Korean) ~808, C at alpha
+0 <=1,018. Relearning at 5-step validation took ~50 min; by FLOP count ~90% of that is validation (101 passes over
+~3M tokens, each document padded to 2048). At 25 steps that is 21 passes, so an estimated ~15-20 min per run.
+
+**Wave 1 GPU-hours (H200).**
+
+| Job | Runs | GPU-h expected | GPU-h if every run hits its epoch cap |
+|---|---|---|---|
+| warm caches | 2 CPU jobs | 0 | 0 |
+| partial B (KL, English) | 8 x 4 GPUs | ~35 | ~78 |
+| partial C (CE, English) | 8 x 4 GPUs | ~27 | ~59 |
+| partial D (CE, English + random Korean targets) | 8 x 4 GPUs | ~37 | ~93 |
+| partial C, alpha 0, 2 epochs | 1 x 4 GPUs | ~12 | ~15 |
+| relearn, 25 models x 10 LRs, eval every 25 | 250 x 1 GPU | ~65-85 | ~210 if eval_every saves nothing |
+| **Total** | | **~175-200** | **~310-330** (~455 if eval_every saves nothing) |
+
+"Expected" assumes each arm stops where arm A did (1-800 steps, 2,551 in all), capped at its epoch. At the 16-GPU
+weekday cap that is ~11-13 h of wall clock with an empty queue.
+
+Wave 2, later: arm E, arm D with unigram targets, and arm F at two alphas.
 
 ## GPU geometry per stage
 
@@ -143,15 +204,14 @@ code audit. Check the first run of each kind and update. App. E reports two to t
 | Program | GPU-h |
 |---|---|
 | **Phase 1**: pretrain 9-18 (submitted), unlearn sweep 8 x 0.3 = ~3, full distill 8-16, arm A early stop at 8 alphas ~30, relearn 12 models x 10 LRs x 0.25 = 30 | **~80-100** (~70-80 after pretraining; ~6-8 h wall after the base model) |
-| Phase 2, fixed: arms B-F at alpha 0.0-0.8, D/E with both target kinds (63 runs, ~215) + relearn (630 x 0.25 = ~160) | ~375 |
-| Phase 2, arm C early stop: 9 runs (~15) + relearn (90 x 0.25) | ~40 |
+| Phase 2, Wave 1 (see its section) | ~175-200 |
 
 Arm A early stop: the paper's stopping steps (Fig 5a) sum to about 1,950. Two array tasks hold a full node each
 while their two lanes drain (task 0: alpha 0.1/0.3/0.5/0.7, ~580 steps of wall; task 1: 0.2/0.4/0.6/0.8, ~770),
 so about 2 x 8 GPUs x 1.5-2 h = ~30 GPU-h. If every run hits the one-epoch cap (~807 steps), ~60.
 
-Relearning cost is mostly validation (every 5 steps, ~1M tokens), so trimming the attacker LR grid (`--lrs`)
-cuts it proportionally.
+Relearning cost is mostly validation (every 5 steps upstream, ~1M real tokens padded to ~3M), so `--eval_every 25`
+cuts it ~3x and trimming the attacker LR grid (`--lrs`) proportionally.
 
 ## Choices to know about
 
@@ -160,5 +220,7 @@ cuts it proportionally.
 - **Pretraining packs** documents into 2048-token sequences (`join_or_subsequence=True`), like every later
   stage. Upstream's pretraining call did not run (it passed an unknown `truncate=False`).
 - **Datasets cache.** File locks do not work across nodes, so `data.sbatch` builds the JSON-to-Arrow cache
-  once. The per-model `map` caches are written by the first job that needs them; two nodes racing on the same
-  model write identical files through an atomic rename.
+  once, and `warm_cache.sbatch` builds a stage's packed and validation caches before its array fans out (in
+  calibration, relearn tasks building the same cache at once crashed). A packing cache's fingerprint includes the
+  tokenizer's path: partial distillation packs with the teacher's tokenizer, and relearning packs every model's
+  Korean with the base model's tokenizer (the same Gemma tokenizer), so all relearns share one cache.
