@@ -8,6 +8,7 @@ AGI-2569:       python run_relearn_language.py --groups refs partial --arms A C 
 import argparse
 import json
 import os
+import sys
 
 from src.tools.relearn_langarith import relearn
 from src.utils.paths import CACHE_DIR, DATASET_DIR, MODEL_DIR, USE_WANDB, WANDB_API_KEY
@@ -129,7 +130,8 @@ setups = {
     }
 }
 
-def launch_relearn(setup_id, lr, model):
+def relearn_setup(setup_id, lr, model):
+    """The setup of one (model, lr) run: model path, record path and output dir filled in."""
     current_setup = setups[setup_id].copy()
     current_setup['learning_rate'] = lr
     current_setup['min_lr'] = lr
@@ -139,6 +141,10 @@ def launch_relearn(setup_id, lr, model):
     model_name = model_name = f"relearned_{model.replace('/', '_')}/{lr}" # Get the substring past the first '/'
     current_setup['path_local_record'] = current_setup['path_local_record'].replace('model_name', model_name)
     current_setup['output_dir'] = current_setup['output_dir'].replace('model_name', model_name)
+    return current_setup, model_name
+
+def launch_relearn(setup_id, lr, model):
+    current_setup, model_name = relearn_setup(setup_id, lr, model)
 
     if relearn_finished(current_setup['path_local_record'], current_setup['max_steps']):
         print(f"[run_relearn_language.py] {model_name} already finished; skipping.")
@@ -260,4 +266,11 @@ if __name__ == "__main__":
     parallel_fn = get_parallel_launch_wrapper(launch_relearn)
     # calls run_experiment in parallel on a separate gpu for each experiment setup when a gpu is free
     launch_in_parallel_one_per_gpu(experiment_list=experiments, experiment_fn=parallel_fn)
+    # The launcher ignores child failures; exit non-zero so Slurm afterok dependents wait.
+    unfinished = [(lr, model) for setup_id, lr, model in experiments
+                  if not relearn_finished(relearn_setup(setup_id, lr, model)[0]['path_local_record'],
+                                          setups[setup_id]['max_steps'])]
+    if unfinished:
+        sys.exit(f"{len(unfinished)} of {len(experiments)} relearn runs have no record reaching step "
+                 f"{setups[SETUPS_TO_RUN[0]]['max_steps']}: {unfinished}")
     
