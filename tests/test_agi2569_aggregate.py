@@ -35,20 +35,20 @@ def relearn(root, model, lr, kor_by_step):
 def records(tmp_path):
     root = str(tmp_path)
     # References: unlearned relearns to 2.0, data filter only to 6.0.
-    relearn(root, REFERENCE_MODELS["unlearn"], 1e-4, {0: 12.0, 5: 2.0, 10: 2.5})
-    relearn(root, REFERENCE_MODELS["filter"], 1e-4, {0: 9.0, 5: 6.0, 10: 6.0})
-    relearn(root, REFERENCE_MODELS["base"], 1e-4, {0: 1.5, 5: 1.4, 10: 1.4})
+    relearn(root, REFERENCE_MODELS["unlearn"], 1e-4, {0: 12.0, 5: 2.0, 500: 2.5})
+    relearn(root, REFERENCE_MODELS["filter"], 1e-4, {0: 9.0, 5: 6.0, 500: 6.0})
+    relearn(root, REFERENCE_MODELS["base"], 1e-4, {0: 1.5, 5: 1.4, 500: 1.4})
     write(f"{root}/{REFERENCE_MODELS['filter']}.txt", [{"train/tokens_seen": 1000}, {"train/tokens_seen": 2000}])
     # Full distillation: 800 steps, the steps-axis denominator.
     write(f"{root}/{REFERENCE_MODELS['full_distill']}.txt", [{"train/step": 799}, {"train/step": 800}])
     # Arm C, alpha 0.3: LR 1e-4 dips to 3.0 mid-run then ends at 5.0; LR 1e-5 ends at 4.0.
     c = partial_distill_name("C", 0.3, 0.1, 111)
-    relearn(root, c, 1e-4, {0: 10.0, 5: 3.0, 10: 5.0})
-    relearn(root, c, 1e-5, {0: 10.0, 5: 4.5, 10: 4.0})
+    relearn(root, c, 1e-4, {0: 10.0, 5: 3.0, 500: 5.0})
+    relearn(root, c, 1e-5, {0: 10.0, 5: 4.5, 500: 4.0})
     write(f"{root}/{c}.txt", [{"train/tokens_seen": 100, "train/step": 100}, {"train/tokens_seen": 200, "train/step": 200}])
     # Arm A (KL), alpha 0.3: ends at 6.0 with 200 tokens.
     a = partial_distill_name("A", 0.3, 0.1, 111)
-    relearn(root, a, 1e-4, {0: 10.0, 5: 6.0, 10: 6.0})
+    relearn(root, a, 1e-4, {0: 10.0, 5: 6.0, 500: 6.0})
     write(f"{root}/{a}.txt", [{"train/tokens_seen": 200}])
     return root
 
@@ -87,7 +87,7 @@ def test_envelope_and_plots(records, tmp_path):
     curves, summary = aggregate.aggregate(records)
     env = aggregate.worst_case_curve(curves)
     c_env = env[env.arm == "C"].set_index("step").kor_loss
-    assert c_env.to_dict() == {0: 10.0, 5: 3.0, 10: 4.0}
+    assert c_env.to_dict() == {0: 10.0, 5: 3.0, 500: 4.0}
     out = str(tmp_path / "out")
     os.makedirs(out)
     paper = plot.load_paper()
@@ -97,6 +97,21 @@ def test_envelope_and_plots(records, tmp_path):
     plot.fig5b(curves, out, "C", "fixed_steps_500", paper)
     for name in ("fig4_relearning", "fig5_robustness", "fig5b_relearning"):
         assert os.path.getsize(f"{out}/{name}.png") > 0
+
+
+def test_incomplete_lrs_dropped_and_flagged(records):
+    # A truncated run (killed at step 5) with a lower loss than any complete run must not set the worst case.
+    c = partial_distill_name("C", 0.3, 0.1, 111)
+    relearn(records, c, 1e-3, {0: 10.0, 5: 0.5})
+    curves, summary = aggregate.aggregate(records)
+    assert row(summary, "C", "min_final").relearned_kor_loss == 4.0
+    assert row(summary, "C", "min_any_step").relearned_kor_loss == 3.0
+    assert row(summary, "C", "min_final").provisional
+    assert "0.001" in row(summary, "C", "min_final").lrs_incomplete
+    env = aggregate.worst_case_curve(curves)
+    assert env[(env.arm == "C") & (env.step == 5)].kor_loss.iloc[0] == 3.0
+    # Every reference has 9 of 10 LRs missing in the fixture, so every robustness is provisional.
+    assert summary.robustness_provisional.all()
 
 
 def test_teacher_lr_in_every_downstream_path():
@@ -115,9 +130,9 @@ def test_teacher_lr_in_every_downstream_path():
 
 def test_other_teacher_lr_kept_apart(records):
     # A 3e-5 teacher's unlearned ref and arm A run: ignored by default, the only teacher-dependent rows at 3e-5.
-    relearn(records, reference_models(3e-5)["unlearn"], 1e-4, {0: 11.0, 5: 1.0, 10: 1.0})
+    relearn(records, reference_models(3e-5)["unlearn"], 1e-4, {0: 11.0, 5: 1.0, 500: 1.0})
     a3 = partial_distill_name("A", 0.3, 0.1, 111, teacher_lr=3e-5)
-    relearn(records, a3, 1e-4, {0: 10.0, 5: 5.0, 10: 5.0})
+    relearn(records, a3, 1e-4, {0: 10.0, 5: 5.0, 500: 5.0})
     _, summary = aggregate.aggregate(records)
     assert len(summary[summary.arm == "A"]) == 2   # one row per definition: only the 8e-5 run
     assert row(summary, "A", "min_any_step").robustness == pytest.approx(1.0)

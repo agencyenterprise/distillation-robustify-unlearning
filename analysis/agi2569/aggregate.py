@@ -25,6 +25,10 @@ Definitions
   the same number of steps as pretraining (~806 in the paper; see paper_targets.md). It needs both runs on the
   same GPU geometry (4 GPUs, 960 sequences per step).
 - The paper's robustness uses the worst-case curve's value at the last step, which is `min_final`.
+- Completeness: a relearn run counts only if its record reaches step 500 (RELEARN_STEPS, upstream's
+  `relearn_finished`). Truncated or missing LRs (of the paper's 10, ATTACK_LRS) are dropped from the worst case and
+  envelope, and the model is marked `provisional` (`lrs_incomplete` lists them). `robustness_provisional` is set
+  when the model or either normalisation reference is provisional.
 - MaxEnt sweep check (`maxent_sweep_check`, maxent_sweep.csv): final English / Korean validation loss of each
   unlearning LR against App. B.1's table (paper_targets.json, scalars.maxent_final).
 """
@@ -45,6 +49,8 @@ PARTIAL_RE = re.compile(
     r"partial_distill-teacher_lr_(?P<teacher_lr>[\d.e+-]+)-arm_(?P<arm>[A-F](?:_uniform|_unigram)?)"
     r"-alpha_(?P<alpha>[\d.]+)-beta_(?P<beta>[\d.]+)-seed_(?P<seed>\d+)-(?P<stop>fixed_steps_\d+|early_stop)$"
 )
+ATTACK_LRS = (1e-3, 7e-4, 4e-4, 1e-4, 7e-5, 5e-5, 1e-5, 7e-6, 4e-6, 1e-6)  # run_relearn_language.py LRS_TO_RUN
+RELEARN_STEPS = 500   # run_relearn_language.py max_steps
 PAPER_TARGETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "paper_targets.json")
 
 
@@ -67,7 +73,8 @@ def describe_model(record_dir, teacher_lr=TEACHER_LR):
 
 
 def load_relearn_curves(records_root, teacher_lr=TEACHER_LR):
-    """Long table: one row per (model, lr, step) validation point."""
+    """Long table: one row per (model, lr, step) validation point, with `complete` (the LR's run reached
+    RELEARN_STEPS). Incomplete runs are kept here; `worst_case` and `worst_case_curve` drop them."""
     rows = []
     base = os.path.join(records_root, "relearned_models")
     for record_dir in sorted(os.listdir(base)):
@@ -84,11 +91,37 @@ def load_relearn_curves(records_root, teacher_lr=TEACHER_LR):
                     rows.append({**meta, "lr": lr, "step": rec["train/step"],
                                  "kor_loss": rec["val/kor_ce_loss"], "eng_loss": rec["val/eng_ce_loss"]})
     # Duplicate final validations (end-of-epoch and max_steps) at the same step are the same model state.
-    return pd.DataFrame(rows).drop_duplicates(subset=["model", "lr", "step"], keep="last")
+    curves = pd.DataFrame(rows).drop_duplicates(subset=["model", "lr", "step"], keep="last")
+    curves["complete"] = curves.groupby(["model", "lr"]).step.transform("max") >= RELEARN_STEPS
+    return curves
+
+
+def completeness(curves):
+    """Per model: the attacker LRs (of ATTACK_LRS) that are missing or did not reach RELEARN_STEPS.
+
+    Returns a DataFrame indexed by model with `lrs_incomplete` (comma-separated LRs, '' if none) and `provisional`.
+    """
+    rows = []
+    for model, group in curves.groupby("model"):
+        done = set(group[group.complete].lr.round(12))
+        bad = [lr for lr in ATTACK_LRS if round(lr, 12) not in done]
+        rows.append({"model": model, "lrs_incomplete": ",".join(f"{lr:g}" for lr in bad), "provisional": bool(bad)})
+    return pd.DataFrame(rows).set_index("model")
+
+
+def _complete(curves):
+    dropped = curves[~curves.complete].drop_duplicates(["model", "lr"])
+    for _, r in dropped.iterrows():
+        print(f"[aggregate] dropping incomplete relearn run: {r.model} lr {r.lr:g} (last step "
+              f"{curves[(curves.model == r.model) & (curves.lr == r.lr)].step.max()})")
+    return curves[curves.complete]
 
 
 def worst_case(curves):
-    """One row per (model, definition): worst-case relearned Korean loss and the LR that achieved it."""
+    """One row per (model, definition): worst-case relearned Korean loss and the LR that achieved it, over the
+    complete LRs only; `lrs_incomplete` and `provisional` say which LRs were left out."""
+    status = completeness(curves)
+    curves = _complete(curves)
     rows = []
     for model, group in curves.groupby("model"):
         meta = group.iloc[0][["model", "role", "arm", "alpha", "beta", "seed", "stop"]].to_dict()
@@ -102,11 +135,12 @@ def worst_case(curves):
         best_final = finals.loc[finals.kor_loss.idxmin()]
         rows.append({**meta, **before, "definition": "min_final", "relearned_kor_loss": best_final.kor_loss,
                      "worst_lr": best_final.lr, "worst_step": best_final.step, "n_lrs": n_lrs})
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows).join(status, on="model")
 
 
 def worst_case_curve(curves):
-    """Per model and step, the lowest Korean loss over LRs (the attacker's envelope; Fig 4 style)."""
+    """Per model and step, the lowest Korean loss over complete LRs (the attacker's envelope; Fig 4 style)."""
+    curves = curves[curves.complete]
     return curves.groupby(["model", "role", "arm", "alpha", "step"], dropna=False).kor_loss.min().reset_index()
 
 
@@ -118,9 +152,12 @@ def add_robustness(summary):
         group = group.copy()
         if "unlearn" in refs and "filter" in refs:
             group["robustness"] = (group.relearned_kor_loss - refs["unlearn"]) / (refs["filter"] - refs["unlearn"])
+            ref_prov = group[group.role.isin(["unlearn", "filter"])].provisional.any()
+            group["robustness_provisional"] = group.provisional | bool(ref_prov)
         else:
             print(f"[aggregate] {definition}: unlearn or filter reference missing; no normalised robustness")
             group["robustness"] = float("nan")
+            group["robustness_provisional"] = True
         out.append(group)
     return pd.concat(out, ignore_index=True)
 
@@ -207,13 +244,13 @@ def main():
     sweep = maxent_sweep_check(args.records_root)
     sweep.to_csv(os.path.join(args.out, "maxent_sweep.csv"), index=False)
     print("== MaxEnt unlearning: final losses vs App. B.1 ==")
-    print(sweep.to_string(index=False, float_format=lambda x: f"{x:.4f}"))
+    print(sweep.to_string(index=False, formatters={"lr": "{:.0e}".format}, float_format=lambda x: f"{x:.4f}"))
     curves, summary = aggregate(args.records_root, args.filter_tokens, args.filter_steps, args.teacher_lr)
     curves.to_csv(os.path.join(args.out, "relearn_curves.csv"), index=False)
     worst_case_curve(curves).to_csv(os.path.join(args.out, "relearn_envelope.csv"), index=False)
     summary.to_csv(os.path.join(args.out, "summary.csv"), index=False)
     cols = ["role", "arm", "alpha", "stop", "eng_loss_before", "relearned_kor_loss", "worst_lr", "robustness",
-            "compute_ratio_flops", "compute_ratio_steps"]
+            "compute_ratio_flops", "compute_ratio_steps", "provisional", "robustness_provisional"]
     for definition in DEFINITIONS:
         print(f"\n== worst case: {definition} ==")
         print(summary[summary.definition == definition][cols].sort_values(["role", "arm", "alpha"]).to_string(index=False))
