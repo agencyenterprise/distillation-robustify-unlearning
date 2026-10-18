@@ -55,7 +55,8 @@ def relearn(
     path_local_record="local_record/relearn_log.jsonl",
     stopping_strategy='first_exhausted',
     overwrite_ok=False,
-    save_models=True
+    save_models=True,
+    dataset_tokenizer_name=None,
 ):
     """
     "Relearning" script that logs CE and PPL during validation.
@@ -105,32 +106,15 @@ def relearn(
     # ----------------------------------------------------------------
     # 2. Load training datasets
     # ----------------------------------------------------------------
-    train_ds_list = []
-    for file in train_files:
-        print_acc(f"[pretrain.py] Loading train dataset from {file}", print_message)
-        train_ds = load_dataset("json", data_files=file, split="train", cache_dir=dataset_cache_dir)
-        train_ds_list.append(train_ds)
-   
-    # If join_or_subsequence, form sequences of exactly max_length 
-    # by joining multiple or using subsequences
-    # else filter for only those less than max_length
-    train_ds_list, message = make_sequence_length(train_ds_list=train_ds_list, tokenizer=tokenizer, max_length=max_length, join_or_subsequence=join_or_subsequence)
-    print_acc(message, print_message)
-    
-    # If both were given, interleave with equal probabilities
-    # If only one is present, that's our train_ds
-    if len(train_ds_list) == 0:
-        raise ValueError("No training datasets were provided!")
-    elif len(train_ds_list) == 1:
-        train_ds = train_ds_list[0]
+    # The packing map's cache fingerprint includes the tokenizer's path, so a tokenizer from one fixed path
+    # (dataset_tokenizer_name) lets every relearned model share one cache instead of building its own.
+    if dataset_tokenizer_name is None:
+        data_tokenizer = tokenizer
     else:
-        lengths = [len(item) for item in train_ds_list]
-        print_acc(f"[pretrain.py] Interleave: {interleave_probs} for datasets with lengths {lengths}", print_message)
-        train_ds = interleave_datasets(train_ds_list, probabilities=interleave_probs, seed=seed, stopping_strategy=stopping_strategy)
+        data_tokenizer = load_tokenizer(dataset_tokenizer_name, cache_dir)
+    train_ds = load_train_dataset(train_files, data_tokenizer, max_length, join_or_subsequence, interleave_probs, seed,
+                                  stopping_strategy, dataset_cache_dir, print_message)
 
-    print_acc(f"[pretrain.py] Train dataset size: {len(train_ds)}", print_message)
-
-   
     # --------------------------------------------------
     # 3) Create DataLoaders
     # --------------------------------------------------
@@ -297,3 +281,41 @@ def relearn(
         unwrapped_model.save_pretrained(save_path)
         tokenizer.save_pretrained(save_path)
         print_acc(f"[relearn.py] Model saved to => {save_path}", print_message)
+
+
+def load_tokenizer(name, cache_dir):
+    """As relearn() loads its tokenizer (the packing cache fingerprint depends on its state)."""
+    tokenizer = AutoTokenizer.from_pretrained(name, cache_dir=cache_dir)
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+    return tokenizer
+
+
+def load_train_dataset(train_files, tokenizer, max_length, join_or_subsequence, interleave_probs, seed,
+                       stopping_strategy, dataset_cache_dir, print_message=True):
+    """The relearning train set (also builds its datasets cache; run_relearn_language.py --warm_cache)."""
+    train_ds_list = []
+    for file in train_files:
+        print_acc(f"[pretrain.py] Loading train dataset from {file}", print_message)
+        train_ds = load_dataset("json", data_files=file, split="train", cache_dir=dataset_cache_dir)
+        train_ds_list.append(train_ds)
+   
+    # If join_or_subsequence, form sequences of exactly max_length 
+    # by joining multiple or using subsequences
+    # else filter for only those less than max_length
+    train_ds_list, message = make_sequence_length(train_ds_list=train_ds_list, tokenizer=tokenizer, max_length=max_length, join_or_subsequence=join_or_subsequence)
+    print_acc(message, print_message)
+
+    # If both were given, interleave with equal probabilities
+    # If only one is present, that's our train_ds
+    if len(train_ds_list) == 0:
+        raise ValueError("No training datasets were provided!")
+    elif len(train_ds_list) == 1:
+        train_ds = train_ds_list[0]
+    else:
+        lengths = [len(item) for item in train_ds_list]
+        print_acc(f"[pretrain.py] Interleave: {interleave_probs} for datasets with lengths {lengths}", print_message)
+        train_ds = interleave_datasets(train_ds_list, probabilities=interleave_probs, seed=seed, stopping_strategy=stopping_strategy)
+
+    print_acc(f"[pretrain.py] Train dataset size: {len(train_ds)}", print_message)
+    return train_ds

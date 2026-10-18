@@ -60,6 +60,11 @@ def last_record(path, key):
         return [json.loads(line) for line in f if key in line][-1]
 
 
+def cache_files():
+    """The datasets cache's Arrow files (map/filter outputs and indices)."""
+    return {os.path.join(d, f) for d, _, files in os.walk(os.environ["CACHE_DIR"]) for f in files if f.endswith(".arrow")}
+
+
 def main():
     random.seed(0)
     for split, n in (("train", 400), ("valid", 40)):
@@ -101,7 +106,12 @@ def main():
     import run_relearn_language as rl
     rl.setups["gemma-2-0.1B_train_only_forget"].update(batch_size=2, max_steps=3, validation_steps=1, max_length=SEQ, device="cpu")
     model = partial_distill_name("C", 0.3, 0.1, 111, "fixed_steps", 3)
+    # --warm_cache builds every cache a relearn run reads: the runs that follow (two models) build none.
+    rl.warm_cache("gemma-2-0.1B_train_only_forget")
+    warm = cache_files()
     rl.launch_relearn("gemma-2-0.1B_train_only_forget", 1e-4, model)
+    rl.launch_relearn("gemma-2-0.1B_train_only_forget", 1e-4, partial_distill_name("A", 0.3, 0.1, 111, "fixed_steps", 3))
+    assert cache_files() == warm, sorted(cache_files() - warm)
     rl.launch_relearn("gemma-2-0.1B_train_only_forget", 1e-4, model)  # skipped as finished
     record_path = f"{MODEL_DIR}/local_records/relearned_models/relearned_{model.replace('/', '_')}/0.0001_eval_every_1_only_forget_data.txt"
     print("[smoke] relearn OK:", last_record(record_path, "val/kor_ce_loss"))

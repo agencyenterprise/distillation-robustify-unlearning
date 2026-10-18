@@ -10,7 +10,7 @@ import json
 import os
 import sys
 
-from src.tools.relearn_langarith import relearn
+from src.tools.relearn_langarith import load_tokenizer, load_train_dataset, relearn
 from src.utils.paths import CACHE_DIR, DATASET_DIR, MODEL_DIR, USE_WANDB, WANDB_API_KEY
 from accelerate import Accelerator
 from utils.loss_functions import custom_login
@@ -88,6 +88,11 @@ for pareto plot
 LRS_TO_RUN =[1e-3, 7e-4, 4e-4, 1e-4, 7e-5, 5e-5, 1e-5, 7e-6, 4e-6, 1e-6]
 
 api_key = WANDB_API_KEY
+
+# Tokenizer for packing the Korean train set. Every model here has the same Gemma tokenizer, but the packing cache
+# fingerprint includes the tokenizer's path, so loading it from one model (the base, whose relearns built this cache
+# in calibration) gives every relearned model the same packed data from one cache instead of building its own.
+DATASET_TOKENIZER = f"{MODEL_DIR}/{REFERENCE_MODELS['base']}/final_model"
 
 custom_login()
 
@@ -204,7 +209,25 @@ def launch_relearn(setup_id, lr, model, eval_every=None):
         path_local_record= current_setup['path_local_record'],
         save_models      = current_setup['save_models'],
         overwrite_ok     = True,  # the record was removed above; output_dir may exist from a crashed run
+        dataset_tokenizer_name = DATASET_TOKENIZER,
     )
+
+def warm_cache(setup_id):
+    """Build (or load) the datasets caches every relearn run reads, in one process, then return. Run it once
+    before fanning out: file locks do not work across nodes, and concurrent first builds crashed runs."""
+    current_setup = setups[setup_id]
+    accelerator = Accelerator(cpu=True)  # only builds datasets; nothing runs on it
+    get_korean_and_english_evalaution_fn(
+        model_name=DATASET_TOKENIZER, max_length=current_setup['max_length'],
+        eng_valid_file=current_setup['eng_valid_file'], kor_valid_file=current_setup['kor_valid_file'],
+        dataset_cache_dir=current_setup['dataset_cache_dir'], cache_dir=current_setup['cache_dir'],
+        batch_size=current_setup['batch_size'], accelerator=accelerator)
+    train_files = [f for f in (current_setup['first_train_file'], current_setup['second_train_file']) if f]
+    load_train_dataset(train_files, load_tokenizer(DATASET_TOKENIZER, current_setup['cache_dir']),
+                       current_setup['max_length'], current_setup['join_or_subsequence'],
+                       current_setup['interleave_probs'], current_setup['seed'], 'first_exhausted',
+                       current_setup['dataset_cache_dir'])
+    print(f"[run_relearn_language.py] datasets cache ready for {setup_id}")
 
 def relearn_finished(path_local_record, max_steps):
     """True if the record has the validation at the last step (written just before relearn() returns)."""
@@ -253,7 +276,13 @@ if __name__ == "__main__":
     parser.add_argument('--shard', type=int, default=0, help='Run every num_shards-th (model, lr) pair from here')
     parser.add_argument('--num_shards', type=int, default=1)
     parser.add_argument('--list', action='store_true', help='Print the (model, lr) pairs and exit')
+    parser.add_argument('--warm_cache', action='store_true',
+                        help='Only build the datasets caches (shared by every model and LR), then exit')
     args = parser.parse_args()
+    if args.warm_cache:
+        for setup_id in SETUPS_TO_RUN:
+            warm_cache(setup_id)
+        raise SystemExit
     if args.groups is not None:
         MODELS_TO_RUN = agi2569_models(args)
     # ----------------------------------------------------------------- #
