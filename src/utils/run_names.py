@@ -4,6 +4,8 @@ Pure Python, no heavy imports, so analysis code can import it locally.
 
 Paths are relative to MODEL_DIR. The relearn records of model `m` at learning rate `lr` live at
     {MODEL_DIR}/local_records/relearned_models/relearned_{m.replace('/', '_')}/{lr}_only_forget_data.txt
+with `_eval_every_{n}` before `_only_forget_data` when relearning validates every n steps instead of upstream's 5
+(relearn_run_name).
 """
 
 # MaxEnt teacher LR for the language setting: 8e-5, the paper's choice (App. B.1 bold, App. C; Fig 4b's unlearned
@@ -43,12 +45,14 @@ REFERENCE_MODELS = reference_models()   # at the default teacher LR
 ARMS = ['A', 'B', 'C', 'D', 'E', 'F']
 RANDOM_TARGET_ARMS = ['D', 'E']   # these take --kor_targets
 KOR_TARGETS = ['uniform', 'unigram']
-STOP_MODES = ['fixed_steps', 'early']
+STOP_MODES = ['fixed_steps', 'early', 'epoch']
 
 SWEEP_ALPHAS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
 SWEEP_BETAS = [0.1]
 SWEEP_SEEDS = [111]   # the seed in the paper's relearn model names
 FIXED_STEPS = 500
+EPOCHS = 1                # epoch mode: number of passes over the training data
+RELEARN_EVAL_EVERY = 5    # upstream's relearn validation interval (steps)
 
 
 def arm_label(arm, kor_targets='uniform'):
@@ -56,8 +60,12 @@ def arm_label(arm, kor_targets='uniform'):
     return f"{arm}_{kor_targets}" if arm in RANDOM_TARGET_ARMS else arm
 
 
-def stop_label(stop_mode, fixed_steps=FIXED_STEPS):
-    return f"fixed_steps_{fixed_steps}" if stop_mode == 'fixed_steps' else 'early_stop'
+def stop_label(stop_mode, fixed_steps=FIXED_STEPS, epochs=EPOCHS):
+    if stop_mode == 'fixed_steps':
+        return f"fixed_steps_{fixed_steps}"
+    if stop_mode == 'epoch':
+        return f"epochs_{epochs}"
+    return 'early_stop'
 
 
 def fmt(x):
@@ -66,11 +74,17 @@ def fmt(x):
 
 
 def partial_distill_name(arm, alpha, beta, seed, stop_mode='fixed_steps', fixed_steps=FIXED_STEPS, kor_targets='uniform',
-                         teacher_lr=TEACHER_LR):
+                         teacher_lr=TEACHER_LR, epochs=EPOCHS):
     return (f"partial_distill_models/gemma-2-0.1B-language-partial_distill-teacher_lr_{lr_tag(teacher_lr)}"
             f"-arm_{arm_label(arm, kor_targets)}"
-            f"-alpha_{fmt(alpha)}-beta_{fmt(beta)}-seed_{seed}-{stop_label(stop_mode, fixed_steps)}")
+            f"-alpha_{fmt(alpha)}-beta_{fmt(beta)}-seed_{seed}-{stop_label(stop_mode, fixed_steps, epochs)}")
 
 
 def relearn_record_dir(model):
     return f"relearned_{model.replace('/', '_')}"
+
+
+def relearn_run_name(model, lr, eval_every=RELEARN_EVAL_EVERY):
+    """'relearned_<model>/<lr>', plus '_eval_every_<n>' unless n is upstream's 5 (so calibration paths are unchanged)."""
+    suffix = "" if eval_every == RELEARN_EVAL_EVERY else f"_eval_every_{eval_every}"
+    return f"{relearn_record_dir(model)}/{lr}{suffix}"

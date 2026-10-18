@@ -60,6 +60,11 @@ def style_axes(ax):
     ax.set_axisbelow(True)
 
 
+def every_50(steps):
+    """Marker positions every 50 relearning steps, whatever the validation interval (5 or 25)."""
+    return [i for i, step in enumerate(steps) if step % 50 == 0]
+
+
 def fig4(curves, out, paper=None):
     envelope = worst_case_curve(curves)
     fig, ax = plt.subplots(figsize=(7, 4.5))
@@ -74,7 +79,7 @@ def fig4(curves, out, paper=None):
     for arm, (color, marker) in ARM_STYLE.items():
         sub = envelope[(envelope.arm == arm) & (envelope.alpha == 0.0)].sort_values("step")
         if len(sub):
-            ax.plot(sub.step, sub.kor_loss, color=color, linewidth=2, marker=marker, markevery=10, markersize=6,
+            ax.plot(sub.step, sub.kor_loss, color=color, linewidth=2, marker=marker, markevery=every_50(sub.step), markersize=6,
                     label=f"arm {arm}, alpha 0")
     style_axes(ax)
     ax.set_xlabel("relearning step")

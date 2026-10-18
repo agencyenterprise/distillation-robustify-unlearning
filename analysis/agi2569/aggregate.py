@@ -13,7 +13,8 @@ Definitions
 - Relearned Korean loss of a model: the attacker fine-tunes on Korean for 500 steps at each LR of a sweep;
   the worst case (for the defender) is the lowest Korean validation loss the attacker reaches. Two definitions,
   both reported, column `definition`:
-    min_any_step  min over LRs and over every validation step (5-step granularity). The attacker may stop early.
+    min_any_step  min over LRs and over every validation step (every `eval_every` steps: 5 upstream and in Phase 1,
+                  25 in Phase 2, so Phase 2 values are slightly higher). The attacker may stop early.
     min_final     min over LRs of the loss at the last step. The attacker picks the LR, not the step.
 - Normalised robustness: R = (P_x - P_unlearn) / (P_filter - P_unlearn), P = worst-case relearned Korean loss.
   0 = as easily relearned as the MaxEnt-unlearned teacher, 1 = as robust as data filtering.
@@ -25,6 +26,9 @@ Definitions
   the same number of steps as pretraining (~806 in the paper; see paper_targets.md). It needs both runs on the
   same GPU geometry (4 GPUs, 960 sequences per step).
 - The paper's robustness uses the worst-case curve's value at the last step, which is `min_final`.
+- Validation interval: a relearn record at an interval other than 5 has `_eval_every_<n>` in its file name
+  (run_names.relearn_run_name). If a (model, LR) has records at several intervals, the finest is used. The envelope
+  keeps only the steps every complete LR of the model validated at.
 - Completeness: a relearn run counts only if its record reaches step 500 (RELEARN_STEPS, upstream's
   `relearn_finished`). Truncated or missing LRs (of the paper's 10, ATTACK_LRS) are dropped from the worst case and
   envelope, and the model is marked `provisional` (`lrs_incomplete` lists them). `robustness_provisional` is set
@@ -41,7 +45,9 @@ import sys
 import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-from src.utils.run_names import TEACHER_LR, lr_tag, reference_models, relearn_record_dir, unlearned_model  # noqa: E402
+from src.utils.run_names import (  # noqa: E402
+    RELEARN_EVAL_EVERY, TEACHER_LR, lr_tag, reference_models, relearn_record_dir, unlearned_model,
+)
 
 DEFINITIONS = ("min_any_step", "min_final")
 KL_ARMS = ("A", "B")
@@ -49,6 +55,7 @@ PARTIAL_RE = re.compile(
     r"partial_distill-teacher_lr_(?P<teacher_lr>[\d.e+-]+)-arm_(?P<arm>[A-F](?:_uniform|_unigram)?)"
     r"-alpha_(?P<alpha>[\d.]+)-beta_(?P<beta>[\d.]+)-seed_(?P<seed>\d+)-(?P<stop>fixed_steps_\d+|early_stop)$"
 )
+RECORD_RE = re.compile(r"^(?P<lr>[^_]+)(?:_eval_every_(?P<eval_every>\d+))?_only_forget_data\.txt$")
 ATTACK_LRS = (1e-3, 7e-4, 4e-4, 1e-4, 7e-5, 5e-5, 1e-5, 7e-6, 4e-6, 1e-6)  # run_relearn_language.py LRS_TO_RUN
 RELEARN_STEPS = 500   # run_relearn_language.py max_steps
 PAPER_TARGETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "paper_targets.json")
@@ -83,15 +90,24 @@ def load_relearn_curves(records_root, teacher_lr=TEACHER_LR):
             print(f"[aggregate] skipping {record_dir} (not ours, or another teacher LR than {lr_tag(teacher_lr)})")
             continue
         for fname in os.listdir(os.path.join(base, record_dir)):
-            if not fname.endswith("_only_forget_data.txt"):
+            match = RECORD_RE.match(fname)
+            if match is None:
                 continue
-            lr = float(fname[: -len("_only_forget_data.txt")])
+            lr = float(match["lr"])
+            eval_every = int(match["eval_every"] or RELEARN_EVAL_EVERY)
             for rec in read_jsonl(os.path.join(base, record_dir, fname)):
                 if "val/kor_ce_loss" in rec:
-                    rows.append({**meta, "lr": lr, "step": rec["train/step"],
+                    rows.append({**meta, "lr": lr, "eval_every": eval_every, "step": rec["train/step"],
                                  "kor_loss": rec["val/kor_ce_loss"], "eng_loss": rec["val/eng_ce_loss"]})
+    curves = pd.DataFrame(rows)
+    # One record per (model, lr): the finest validation interval that reached the end, else the finest.
+    curves["complete"] = curves.groupby(["model", "lr", "eval_every"]).step.transform("max") >= RELEARN_STEPS
+    pick = (curves.drop_duplicates(["model", "lr", "eval_every"])
+            .sort_values(["complete", "eval_every"], ascending=[False, True])
+            .drop_duplicates(["model", "lr"])[["model", "lr", "eval_every"]])
+    curves = curves.merge(pick, on=["model", "lr", "eval_every"]).drop(columns="complete")
     # Duplicate final validations (end-of-epoch and max_steps) at the same step are the same model state.
-    curves = pd.DataFrame(rows).drop_duplicates(subset=["model", "lr", "step"], keep="last")
+    curves = curves.drop_duplicates(subset=["model", "lr", "step"], keep="last")
     curves["complete"] = curves.groupby(["model", "lr"]).step.transform("max") >= RELEARN_STEPS
     return curves
 
@@ -125,6 +141,7 @@ def worst_case(curves):
     rows = []
     for model, group in curves.groupby("model"):
         meta = group.iloc[0][["model", "role", "arm", "alpha", "beta", "seed", "stop"]].to_dict()
+        meta["eval_every"] = group.eval_every.max()
         start = group[group.step == 0]
         before = {"kor_loss_before": start.kor_loss.mean(), "eng_loss_before": start.eng_loss.mean()}
         n_lrs = group.lr.nunique()
@@ -139,9 +156,12 @@ def worst_case(curves):
 
 
 def worst_case_curve(curves):
-    """Per model and step, the lowest Korean loss over complete LRs (the attacker's envelope; Fig 4 style)."""
+    """Per model and step, the lowest Korean loss over complete LRs (the attacker's envelope; Fig 4 style), at the
+    steps every complete LR validated at (so a model relearned at mixed intervals gets its coarsest grid)."""
     curves = curves[curves.complete]
-    return curves.groupby(["model", "role", "arm", "alpha", "step"], dropna=False).kor_loss.min().reset_index()
+    n_lrs = curves.groupby("model").lr.transform("nunique")
+    curves = curves[curves.groupby(["model", "step"]).lr.transform("nunique") == n_lrs]
+    return curves.groupby(["model", "role", "arm", "alpha", "stop", "step"], dropna=False).kor_loss.min().reset_index()
 
 
 def add_robustness(summary):
@@ -249,7 +269,7 @@ def main():
     curves.to_csv(os.path.join(args.out, "relearn_curves.csv"), index=False)
     worst_case_curve(curves).to_csv(os.path.join(args.out, "relearn_envelope.csv"), index=False)
     summary.to_csv(os.path.join(args.out, "summary.csv"), index=False)
-    cols = ["role", "arm", "alpha", "stop", "eng_loss_before", "relearned_kor_loss", "worst_lr", "robustness",
+    cols = ["role", "arm", "alpha", "stop", "eval_every", "eng_loss_before", "relearned_kor_loss", "worst_lr", "robustness",
             "compute_ratio_flops", "compute_ratio_steps", "provisional", "robustness_provisional"]
     for definition in DEFINITIONS:
         print(f"\n== worst case: {definition} ==")

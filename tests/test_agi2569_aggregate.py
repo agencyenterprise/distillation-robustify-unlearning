@@ -11,7 +11,8 @@ sys.path.insert(0, os.path.join(ROOT, "analysis", "agi2569"))
 import aggregate  # noqa: E402
 import plot  # noqa: E402
 from src.utils.run_names import (  # noqa: E402
-    REFERENCE_MODELS, TEACHER_LR, partial_distill_name, reference_models, relearn_record_dir, unlearned_model,
+    REFERENCE_MODELS, TEACHER_LR, partial_distill_name, reference_models, relearn_record_dir, relearn_run_name,
+    unlearned_model,
 )
 
 
@@ -22,8 +23,8 @@ def write(path, records):
             f.write(json.dumps(rec) + "\n")
 
 
-def relearn(root, model, lr, kor_by_step):
-    path = f"{root}/relearned_models/{relearn_record_dir(model)}/{lr}_only_forget_data.txt"
+def relearn(root, model, lr, kor_by_step, eval_every=5):
+    path = f"{root}/relearned_models/{relearn_run_name(model, lr, eval_every)}_only_forget_data.txt"
     records = []
     for step, kor in kor_by_step.items():
         records.append({"val/eng_ce_loss": 3.0, "val/kor_ce_loss": kor, "train/step": step, "train/tokens_seen": 0})
@@ -112,6 +113,26 @@ def test_incomplete_lrs_dropped_and_flagged(records):
     assert env[(env.arm == "C") & (env.step == 5)].kor_loss.iloc[0] == 3.0
     # Every reference has 9 of 10 LRs missing in the fixture, so every robustness is provisional.
     assert summary.robustness_provisional.all()
+
+
+def test_eval_every_in_path_and_coarser_curves(records):
+    # Upstream's 5 keeps the calibration path; 25 is in the file name.
+    b = partial_distill_name("B", 0.3, 0.1, 111, "early")
+    assert relearn_run_name(b, 1e-4) == f"{relearn_record_dir(b)}/0.0001"
+    assert relearn_run_name(b, 1e-4, 25) == f"{relearn_record_dir(b)}/0.0001_eval_every_25"
+    relearn(records, b, 1e-4, {0: 10.0, 25: 5.0, 50: 4.0, 475: 3.5, 500: 4.5}, eval_every=25)
+    relearn(records, b, 1e-5, {0: 10.0, 25: 6.0, 50: 5.0, 475: 5.0, 500: 5.0}, eval_every=25)
+    # A second, finer record of one LR (a rerun at the upstream interval) is preferred to the coarse one.
+    relearn(records, b, 1e-5, {0: 10.0, 5: 3.0, 25: 6.0, 50: 5.0, 475: 5.0, 500: 4.0})
+    curves, summary = aggregate.aggregate(records)
+    assert set(curves[curves.arm == "B"].groupby("lr").eval_every.first().to_dict().items()) == {(1e-4, 25), (1e-5, 5)}
+    assert row(summary, "B", "min_final").relearned_kor_loss == 4.0
+    assert row(summary, "B", "min_final").eval_every == 25
+    assert row(summary, "C", "min_final").eval_every == 5
+    # The envelope keeps only the steps both LRs validated at.
+    env = aggregate.worst_case_curve(curves)
+    assert env[env.arm == "B"].set_index("step").kor_loss.to_dict() == {0: 10.0, 25: 5.0, 50: 4.0, 475: 3.5, 500: 4.0}
+    assert env[env.arm == "C"].set_index("step").kor_loss.to_dict() == {0: 10.0, 5: 3.0, 500: 4.0}
 
 
 def test_teacher_lr_in_every_downstream_path():

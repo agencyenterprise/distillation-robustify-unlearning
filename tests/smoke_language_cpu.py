@@ -103,8 +103,15 @@ def main():
     model = partial_distill_name("C", 0.3, 0.1, 111, "fixed_steps", 3)
     rl.launch_relearn("gemma-2-0.1B_train_only_forget", 1e-4, model)
     rl.launch_relearn("gemma-2-0.1B_train_only_forget", 1e-4, model)  # skipped as finished
-    record_path = f"{MODEL_DIR}/local_records/relearned_models/relearned_{model.replace('/', '_')}/0.0001_only_forget_data.txt"
+    record_path = f"{MODEL_DIR}/local_records/relearned_models/relearned_{model.replace('/', '_')}/0.0001_eval_every_1_only_forget_data.txt"
     print("[smoke] relearn OK:", last_record(record_path, "val/kor_ce_loss"))
+    # --eval_every 2 over 3 steps: validated at steps 0 and 2, and at the last step; its own record path.
+    rl.launch_relearn("gemma-2-0.1B_train_only_forget", 1e-4, model, eval_every=2)
+    record_path = record_path.replace("_eval_every_1_", "_eval_every_2_")
+    with open(record_path) as f:
+        val_steps = sorted({r["train/step"] for r in map(json.loads, f) if "val/kor_ce_loss" in r})
+    assert val_steps == [0, 2, 3], val_steps
+    assert rl.relearn_finished(record_path, 3)
     print("[smoke] all OK")
     shutil.rmtree(WORK)
 

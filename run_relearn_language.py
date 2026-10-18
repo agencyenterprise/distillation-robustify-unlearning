@@ -3,7 +3,7 @@ Configured for a (any)xH200 GPU server.
 
 Launch Command: python run_relearn_language.py
 AGI-2569:       python run_relearn_language.py --groups refs partial --arms A C --lrs 1e-4 1e-5 [--teacher_lr 8e-5]
-                    [--shard i --num_shards n] [--list]
+                    [--eval_every 25] [--shard i --num_shards n] [--list]
 """
 import argparse
 import json
@@ -19,7 +19,7 @@ from utils.validation_functions import get_korean_and_english_evalaution_fn
 from utils.parallel_launch import launch_in_parallel_one_per_gpu, get_parallel_launch_wrapper
 from src.utils.run_names import (
     REFERENCE_MODELS, ARMS, RANDOM_TARGET_ARMS, KOR_TARGETS, STOP_MODES, SWEEP_ALPHAS, SWEEP_BETAS, SWEEP_SEEDS,
-    FIXED_STEPS, TEACHER_LR, partial_distill_name, reference_models, relearn_record_dir,
+    FIXED_STEPS, RELEARN_EVAL_EVERY, TEACHER_LR, partial_distill_name, reference_models, relearn_run_name,
 )
 
 SETUPS_TO_RUN = [
@@ -130,21 +130,24 @@ setups = {
     }
 }
 
-def relearn_setup(setup_id, lr, model):
-    """The setup of one (model, lr) run: model path, record path and output dir filled in."""
+def relearn_setup(setup_id, lr, model, eval_every=None):
+    """The setup of one (model, lr) run: model path, record path and output dir filled in. eval_every (default:
+    the setup's validation_steps, upstream's 5) is in the record path unless it is 5."""
     current_setup = setups[setup_id].copy()
     current_setup['learning_rate'] = lr
     current_setup['min_lr'] = lr
+    if eval_every is not None:
+        current_setup['validation_steps'] = eval_every
     current_setup['model_name'] = current_setup['model_name'].replace('model_path', model)
     if "distilled" not in current_setup['model_name']:
         current_setup['model_name'] = current_setup['model_name'].replace('final_student', "final_model")
-    model_name = model_name = f"relearned_{model.replace('/', '_')}/{lr}" # Get the substring past the first '/'
+    model_name = relearn_run_name(model, lr, current_setup['validation_steps'])
     current_setup['path_local_record'] = current_setup['path_local_record'].replace('model_name', model_name)
     current_setup['output_dir'] = current_setup['output_dir'].replace('model_name', model_name)
     return current_setup, model_name
 
-def launch_relearn(setup_id, lr, model):
-    current_setup, model_name = relearn_setup(setup_id, lr, model)
+def launch_relearn(setup_id, lr, model, eval_every=None):
+    current_setup, model_name = relearn_setup(setup_id, lr, model, eval_every)
 
     if relearn_finished(current_setup['path_local_record'], current_setup['max_steps']):
         print(f"[run_relearn_language.py] {model_name} already finished; skipping.")
@@ -245,6 +248,8 @@ if __name__ == "__main__":
     parser.add_argument('--teacher_lr', type=float, default=TEACHER_LR,
                         help='MaxEnt teacher LR of the unlearn/full_distill refs and partial models (default 8e-5)')
     parser.add_argument('--lrs', nargs='+', type=float, default=LRS_TO_RUN)
+    parser.add_argument('--eval_every', type=int, default=RELEARN_EVAL_EVERY,
+                        help='Validate every n steps (upstream 5); step 500 is always validated. Not 5: in the record path')
     parser.add_argument('--shard', type=int, default=0, help='Run every num_shards-th (model, lr) pair from here')
     parser.add_argument('--num_shards', type=int, default=1)
     parser.add_argument('--list', action='store_true', help='Print the (model, lr) pairs and exit')
@@ -255,7 +260,8 @@ if __name__ == "__main__":
     # Run all experiments, if possible in parallel
     # ----------------------------------------------------------------- #
     # Create list of the setups (arguments for run_experiment) for all the experiments we want to run 
-    experiments = [(setup_id, lr, model) for setup_id in SETUPS_TO_RUN for lr in args.lrs for model in MODELS_TO_RUN]
+    experiments = [(setup_id, lr, model, args.eval_every)
+                   for setup_id in SETUPS_TO_RUN for lr in args.lrs for model in MODELS_TO_RUN]
     experiments = experiments[args.shard::args.num_shards]
     if args.list:
         for experiment in experiments:
@@ -267,8 +273,8 @@ if __name__ == "__main__":
     # calls run_experiment in parallel on a separate gpu for each experiment setup when a gpu is free
     launch_in_parallel_one_per_gpu(experiment_list=experiments, experiment_fn=parallel_fn)
     # The launcher ignores child failures; exit non-zero so Slurm afterok dependents wait.
-    unfinished = [(lr, model) for setup_id, lr, model in experiments
-                  if not relearn_finished(relearn_setup(setup_id, lr, model)[0]['path_local_record'],
+    unfinished = [(lr, model) for setup_id, lr, model, eval_every in experiments
+                  if not relearn_finished(relearn_setup(setup_id, lr, model, eval_every)[0]['path_local_record'],
                                           setups[setup_id]['max_steps'])]
     if unfinished:
         sys.exit(f"{len(unfinished)} of {len(experiments)} relearn runs have no record reaching step "
