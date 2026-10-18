@@ -12,8 +12,10 @@ The teacher is always the MaxEnt-unlearned model, at --teacher_lr (default 8e-5,
 3e-5). The LR is part of every run name. In C-F it is evaluated once, as the reference for the
 early-stop condition, and never run during training.
 
-Stopping: --stop_mode fixed_steps (default; --fixed_steps 500, as in the paper's relearn model names)
-or --stop_mode early (upstream: stop once English validation loss is within 5% of the teacher's).
+Stopping: --stop_mode fixed_steps (default; --fixed_steps 500, as in the paper's relearn model names),
+--stop_mode early (upstream: stop once English validation loss is within 5% of the teacher's; at most one epoch), or
+--stop_mode epoch (train --epochs full passes, default 1, with no early stop; the cosine spans them, as early mode's
+spans its epoch). Epoch mode is for runs that early stop would end at once, e.g. arm C at alpha 0.
 
 GPUs: the paper ran every language UNDO run on 4 H200s (arXiv 2506.06278, App. E): per-process batch 4 x 60
 accumulation, so 960 sequences per optimizer step. --gpus_per_run 4 reproduces this; the step and schedule
@@ -26,7 +28,7 @@ Launch Command (Sweep):      python run_partial_distill_language.py --run_all --
 from src.tools.partial_distill_langarith import load_tokenizer, load_train_dataset, partial_distill
 from src.utils.paths import CACHE_DIR, DATASET_DIR, MODEL_DIR, USE_WANDB, WANDB_API_KEY
 from src.utils.run_names import (
-    ARMS, KOR_TARGETS, STOP_MODES, SWEEP_ALPHAS, SWEEP_BETAS, SWEEP_SEEDS, FIXED_STEPS, TEACHER_LR,
+    ARMS, EPOCHS, KOR_TARGETS, STOP_MODES, SWEEP_ALPHAS, SWEEP_BETAS, SWEEP_SEEDS, FIXED_STEPS, TEACHER_LR,
     partial_distill_name, reference_models,
 )
 from accelerate import Accelerator
@@ -136,11 +138,11 @@ def korean_english_stop_cond_fn(student_eval_dict, teacher_eval_dict, stop_condi
         return eng_diff < retain_threshold and kor_diff < forget_threshold
 
 def never_stop_cond_fn(student_eval_dict, teacher_eval_dict):
-    """fixed_steps mode: train for exactly max_steps."""
+    """fixed_steps mode: train for exactly max_steps. epoch mode: for exactly the epochs."""
     return False
 
 def run_experiment(setup_id, alpha, beta, seed=None, arm='A', kor_targets='uniform', stop_mode='fixed_steps',
-                   fixed_steps=FIXED_STEPS, max_steps=None, teacher_lr=TEACHER_LR):
+                   fixed_steps=FIXED_STEPS, max_steps=None, teacher_lr=TEACHER_LR, epochs=EPOCHS):
     """Run a single experiment. max_steps caps early-stop runs (default: none, as upstream)."""
     current_setup = setups[setup_id].copy()
     arm_config = ARM_CONFIGS[arm]
@@ -150,7 +152,7 @@ def run_experiment(setup_id, alpha, beta, seed=None, arm='A', kor_targets='unifo
         current_setup['seed'] = seed
 
     model_name = partial_distill_name(arm, alpha, beta, current_setup['seed'], stop_mode, fixed_steps, kor_targets,
-                                      teacher_lr)
+                                      teacher_lr, epochs)
     current_setup['output_dir'] = current_setup['output_dir'].replace('model_name', model_name)
     current_setup['path_local_record'] = current_setup['path_local_record'].replace('model_name', model_name)
     current_setup['teacher_model_name'] = model_path('unlearn', teacher_lr)
@@ -159,6 +161,11 @@ def run_experiment(setup_id, alpha, beta, seed=None, arm='A', kor_targets='unifo
     current_setup['noise_beta'] = beta
     if stop_mode == 'fixed_steps':
         current_setup['max_steps'] = fixed_steps
+    elif stop_mode == 'epoch':
+        # No step cap (max_steps -1): total_steps, and so the cosine, span all the epochs, as in early mode.
+        if max_steps is not None:
+            raise ValueError("--max_steps does not apply to --stop_mode epoch (it would also shorten the schedule)")
+        current_setup['epochs'] = epochs
     elif max_steps is not None:
         current_setup['max_steps'] = max_steps
 
@@ -253,10 +260,10 @@ def warm_cache(args):
               f"{len(train_ds)} rows")
 
 def experiment_cli_args(experiment):
-    setup_id, alpha, beta, seed, arm, kor_targets, stop_mode, fixed_steps, max_steps, teacher_lr = experiment
+    setup_id, alpha, beta, seed, arm, kor_targets, stop_mode, fixed_steps, max_steps, teacher_lr, epochs = experiment
     cmd = ["--setup", setup_id, "--alpha", str(alpha), "--beta", str(beta), "--seed", str(seed), "--arm", arm,
            "--kor_targets", kor_targets, "--stop_mode", stop_mode, "--fixed_steps", str(fixed_steps),
-           "--teacher_lr", str(teacher_lr)]
+           "--teacher_lr", str(teacher_lr), "--epochs", str(epochs)]
     if max_steps is not None:
         cmd.extend(["--max_steps", str(max_steps)])
     return cmd
@@ -291,7 +298,7 @@ def run_all_experiments(args):
     """Run all experiments in the sweep, optionally starting from a specific alpha"""
     alphas = [a for a in args.alphas if args.start_alpha is None or a >= args.start_alpha]
     experiments = [(setup_id, alpha, beta, seed, arm, args.kor_targets, args.stop_mode, args.fixed_steps, args.max_steps,
-                    args.teacher_lr)
+                    args.teacher_lr, args.epochs)
                    for setup_id in SETUPS_TO_RUN
                    for arm in args.arms
                    for alpha in alphas
@@ -351,6 +358,7 @@ if __name__ == "__main__":
                              'cosine schedule, so leave it unset to match the paper (an epoch is the cap there)')
     parser.add_argument('--teacher_lr', type=float, default=TEACHER_LR,
                         help='MaxEnt teacher LR (default 8e-5, the paper\'s; upstream hard-coded 3e-5)')
+    parser.add_argument('--epochs', type=int, default=EPOCHS, help='epoch mode only: passes over the training data')
     parser.add_argument('--run_all', action='store_true', help='Run all experiments in the sweep')
     parser.add_argument('--start_alpha', type=float, default=None, help='Alpha value to start from (inclusive)')
     parser.add_argument('--arms', nargs='+', choices=ARMS, default=['A'], help='Sweep: arms')
@@ -374,7 +382,7 @@ if __name__ == "__main__":
     if args.alpha is not None and args.beta is not None:
         print(f"Running single experiment: arm {args.arm}, alpha {args.alpha}, beta {args.beta}, seed {args.seed}, {args.stop_mode}")
         run_experiment(args.setup, args.alpha, args.beta, args.seed, args.arm, args.kor_targets,
-                       args.stop_mode, args.fixed_steps, args.max_steps, args.teacher_lr)
+                       args.stop_mode, args.fixed_steps, args.max_steps, args.teacher_lr, args.epochs)
 
     # If run_all flag is set, run all experiments
     elif args.run_all or args.start_alpha is not None:

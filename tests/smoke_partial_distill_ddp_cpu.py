@@ -3,7 +3,7 @@ CPU check of partial distillation under 2-process DDP (gloo), the geometry the c
 Checks: the noised student is identical on every rank before the DDP wrap; records are written once; tokens_seen
 counts every rank; the LR schedule advances num_processes ticks per optimizer step (accelerate's prepared scheduler,
 so upstream's total_steps, computed from the unsharded loader, is in ticks); fixed-step and early-stop runs end
-together on all ranks; a rerun is skipped.
+together on all ranks; epoch mode runs every epoch with the cosine over all of them; a rerun is skipped.
 
     python tests/smoke_partial_distill_ddp_cpu.py      # from the repo root; launches itself with torchrun
 """
@@ -100,14 +100,16 @@ def upstream_lr(tick, total_ticks, lr=9e-4, min_lr=7e-4):
     return lr * (0.5 * (1 + math.cos(math.pi * progress)) * (1 - min_lr / lr) + min_lr / lr)
 
 
-for arm, stop_mode in (("A", "fixed_steps"), ("D", "fixed_steps"), ("C", "early")):
-    pd.run_experiment("gemma-2-0.1B_MaxEnt", 0.3, 0.1, 111, arm, "uniform", stop_mode, fixed_steps=STEPS, max_steps=4)
+EPOCHS = 2
+for arm, stop_mode in (("A", "fixed_steps"), ("D", "fixed_steps"), ("C", "early"), ("C", "epoch")):
+    pd.run_experiment("gemma-2-0.1B_MaxEnt", 0.3, 0.1, 111, arm, "uniform", stop_mode, fixed_steps=STEPS,
+                      max_steps=None if stop_mode == "epoch" else 4, epochs=EPOCHS)
     state.wait_for_everyone()
     sums = [None] * NPROC
     dist.all_gather_object(sums, noised[-1])
     assert len(set(sums)) == 1, f"noised student differs across ranks: {sums}"
     if state.is_main_process:
-        name = partial_distill_name(arm, 0.3, 0.1, 111, stop_mode, STEPS)
+        name = partial_distill_name(arm, 0.3, 0.1, 111, stop_mode, STEPS, epochs=EPOCHS)
         with open(f"{MODEL_DIR}/local_records/{name}.txt") as f:
             records = [json.loads(line) for line in f]
         train = [r for r in records if "train/lr" in r]
@@ -119,6 +121,18 @@ for arm, stop_mode in (("A", "fixed_steps"), ("D", "fixed_steps"), ("C", "early"
             assert train[-1]["train/tokens_seen"] == STEPS * ACCUM * BATCH * NPROC * SEQ, train[-1]
             # total_steps = min(epoch steps, max_steps) = STEPS ticks; optimizer step k is tick k * NPROC.
             expected = [upstream_lr(k * NPROC, STEPS) for k in steps]
+            assert all(math.isclose(r["train/lr"], e, rel_tol=1e-6) for r, e in zip(train, expected)), \
+                ([r["train/lr"] for r in train], expected)
+        if stop_mode == "epoch":
+            # Every epoch in full, no early stop, and the cosine over all of them: total_steps is the unsharded
+            # loader's batches // ACCUM x EPOCHS ticks, as in early mode (not fixed mode's step cap).
+            teacher_tokenizer = tool.load_tokenizer(pd.model_path("unlearn"), None)
+            rows = len(tool.load_train_dataset([pd.TRAIN_FILES["eng"]], teacher_tokenizer, SEQ, True, [1.0], 111,
+                                               "first_exhausted", os.environ["CACHE_DIR"], False))
+            batches = math.ceil(rows / BATCH)
+            assert len(steps) == EPOCHS * (math.ceil(batches / NPROC) // ACCUM), (len(steps), rows)
+            total_ticks = batches // ACCUM * EPOCHS
+            expected = [upstream_lr(k * NPROC, total_ticks) for k in steps]
             assert all(math.isclose(r["train/lr"], e, rel_tol=1e-6) for r, e in zip(train, expected)), \
                 ([r["train/lr"] for r in train], expected)
         assert sum(r.get("validation_stage") == "final_student" for r in records) == 1
