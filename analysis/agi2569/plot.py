@@ -6,8 +6,8 @@ Fig 4 and Fig 5 style plots for AGI-2569, one curve per arm.
                                     [--teacher_lr 8e-5]
 
 fig4_relearning.png  Attacker's envelope (min over LRs at each step) of Korean loss during relearning, for the
-                     reference models and each arm at alpha = 0 (arm C at alpha 0 = "unlearn, then fine-tune on
-                     English", the extra curve the plan asks for).
+                     reference models and each alpha = 0 run. Arm C at alpha 0 in epoch mode (stop `epochs_<n>`) is
+                     "unlearn, then CE fine-tune on English", the extra Fig 4 curve; it is also a point in fig 5.
 fig5_robustness.png  Normalised robustness vs compute ratio to data filtering, one line per arm over alpha.
                      Early-stop runs (the default --stop, as in Fig 5a) use the compute ratio as x-axis.
                      Fixed-step runs all cost the same, so with --stop fixed_steps_500 the x-axis is alpha.
@@ -65,6 +65,13 @@ def every_50(steps):
     return [i for i, step in enumerate(steps) if step % 50 == 0]
 
 
+def alpha0_label(arm, stop):
+    if stop.startswith("epochs_"):
+        n = int(stop.split("_")[1])
+        return f"unlearn + CE fine-tune on English, {n} epoch{'s' if n > 1 else ''} (arm {arm}, alpha 0)"
+    return f"arm {arm}, alpha 0 ({stop})"
+
+
 def fig4(curves, out, paper=None):
     envelope = worst_case_curve(curves)
     fig, ax = plt.subplots(figsize=(7, 4.5))
@@ -76,11 +83,12 @@ def fig4(curves, out, paper=None):
         for role, color in (("unlearn", "#a35bb0"), ("full_distill", "#2a78d6"), ("filter", "#c27c00")):
             plot_paper_curve(ax, paper["fig4b_maxent_language"]["curves"][role], color, f"paper: {REF_STYLE[role][2]}")
         ax.set_ylim(top=7.5)
-    for arm, (color, marker) in ARM_STYLE.items():
-        sub = envelope[(envelope.arm == arm) & (envelope.alpha == 0.0)].sort_values("step")
-        if len(sub):
-            ax.plot(sub.step, sub.kor_loss, color=color, linewidth=2, marker=marker, markevery=every_50(sub.step), markersize=6,
-                    label=f"arm {arm}, alpha 0")
+    alpha0 = envelope[(envelope.role == "partial") & (envelope.alpha == 0.0) & envelope.arm.isin(list(ARM_STYLE))]
+    for (arm, stop), sub in alpha0.groupby(["arm", "stop"]):
+        color, marker = ARM_STYLE[arm]
+        sub = sub.sort_values("step")
+        ax.plot(sub.step, sub.kor_loss, color=color, linewidth=2, marker=marker, markevery=every_50(sub.step),
+                markersize=6, label=alpha0_label(arm, stop))
     style_axes(ax)
     ax.set_xlabel("relearning step")
     ax.set_ylabel("Korean val loss (min over attacker LRs)")
@@ -109,6 +117,11 @@ def fig5(summary, out, definition, stop, compute, paper=None):
     full = data[data.role == "full_distill"]
     if len(full) and not by_alpha:
         ax.scatter(full[x_col], full.robustness, color="#0b0b0b", marker="*", s=120, zorder=3, label="full distill")
+    epoch_runs = data[data.stop.fillna("").str.startswith("epochs_") & (data.alpha == 0.0)]
+    for _, r in (epoch_runs.iterrows() if not by_alpha else []):
+        color, marker = ARM_STYLE.get(r.arm, ("#52514e", "o"))
+        ax.scatter([r[x_col]], [r.robustness], color=color, marker=marker, s=90, zorder=3, edgecolors="#0b0b0b",
+                   label=alpha0_label(r.arm, r.stop))
     for arm, (color, marker) in ARM_STYLE.items():
         sub = data[(data.arm == arm) & (data.stop == stop)].sort_values("alpha")
         if len(sub) == 0:

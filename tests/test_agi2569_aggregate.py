@@ -135,6 +135,23 @@ def test_eval_every_in_path_and_coarser_curves(records):
     assert env[env.arm == "C"].set_index("step").kor_loss.to_dict() == {0: 10.0, 5: 3.0, 500: 4.0}
 
 
+def test_epoch_mode_run(records, tmp_path):
+    # Arm C at alpha 0 trained 2 epochs: its own name, recognised, a curve in fig 4 and a point in fig 5.
+    c0 = partial_distill_name("C", 0.0, 0.1, 111, "epoch", epochs=2)
+    assert c0.endswith("-seed_111-epochs_2")
+    assert partial_distill_name("C", 0.0, 0.1, 111, "epoch").endswith("-epochs_1")
+    relearn(records, c0, 1e-4, {0: 10.0, 25: 5.5, 500: 5.0}, eval_every=25)
+    write(f"{records}/{c0}.txt", [{"train/tokens_seen": 1600, "train/step": 808}])
+    curves, summary = aggregate.aggregate(records)
+    r = row(summary[summary.alpha == 0.0], "C", "min_final")
+    assert (r.stop, r.relearned_kor_loss, r.compute_ratio_steps) == ("epochs_2", 5.0, 808 / 800)
+    out = str(tmp_path / "out")
+    os.makedirs(out)
+    plot.fig4(curves, out)
+    plot.fig5(summary, out, "min_final", "early_stop", "steps")
+    assert plot.alpha0_label("C", "epochs_2").startswith("unlearn + CE fine-tune on English, 2 epochs")
+
+
 def test_teacher_lr_in_every_downstream_path():
     assert TEACHER_LR == 8e-5
     refs3, refs8 = reference_models(3e-5), reference_models(8e-5)
