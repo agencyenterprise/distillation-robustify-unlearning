@@ -239,10 +239,15 @@ def run_experiment(setup_id, alpha, beta, seed=None, arm='A', kor_targets='unifo
         random_target_counts_path=KOR_UNIGRAM_COUNTS if (arm_config['random_kor'] and kor_targets == 'unigram') else None,
     )
 
+def arrow_files():
+    """The datasets cache's Arrow files, to report what --warm_cache built."""
+    return {os.path.join(d, f) for d, _, files in os.walk(CACHE_DIR) for f in files if f.endswith(".arrow")}
+
 def warm_cache(args):
     """Build (or load) the datasets caches the sweep's runs read, in one process, then return. Run it once before
     fanning out: file locks do not work across nodes. Packing depends on the teacher's tokenizer and the arm's train
     files; interleaving also on the seed; validation on neither."""
+    before = arrow_files()
     current_setup = setups[SETUPS_TO_RUN[0]]
     teacher = model_path('unlearn', args.teacher_lr)
     accelerator = Accelerator(cpu=True)  # only builds datasets; nothing runs on it
@@ -258,6 +263,7 @@ def warm_cache(args):
                                       current_setup['dataset_cache_dir'])
         print(f"[run_partial_distill_language.py] datasets cache ready: {'+'.join(domains)}, seed {seed}, "
               f"{len(train_ds)} rows")
+    print(f"[warm_cache] {len(arrow_files() - before)} new cache files in {CACHE_DIR} (0: every cache existed)")
 
 def experiment_cli_args(experiment):
     setup_id, alpha, beta, seed, arm, kor_targets, stop_mode, fixed_steps, max_steps, teacher_lr, epochs = experiment

@@ -212,9 +212,14 @@ def launch_relearn(setup_id, lr, model, eval_every=None):
         dataset_tokenizer_name = DATASET_TOKENIZER,
     )
 
+def arrow_files():
+    """The datasets cache's Arrow files, to report what --warm_cache built."""
+    return {os.path.join(d, f) for d, _, files in os.walk(CACHE_DIR) for f in files if f.endswith(".arrow")}
+
 def warm_cache(setup_id):
     """Build (or load) the datasets caches every relearn run reads, in one process, then return. Run it once
     before fanning out: file locks do not work across nodes, and concurrent first builds crashed runs."""
+    before = arrow_files()
     current_setup = setups[setup_id]
     accelerator = Accelerator(cpu=True)  # only builds datasets; nothing runs on it
     get_korean_and_english_evalaution_fn(
@@ -228,6 +233,7 @@ def warm_cache(setup_id):
                        current_setup['interleave_probs'], current_setup['seed'], 'first_exhausted',
                        current_setup['dataset_cache_dir'])
     print(f"[run_relearn_language.py] datasets cache ready for {setup_id}")
+    print(f"[warm_cache] {len(arrow_files() - before)} new cache files in {CACHE_DIR} (0: every cache existed)")
 
 def relearn_finished(path_local_record, max_steps):
     """True if the record has the validation at the last step (written just before relearn() returns)."""
