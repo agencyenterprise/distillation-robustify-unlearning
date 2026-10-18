@@ -23,7 +23,7 @@ Launch Command (Single):     accelerate launch --multi_gpu --num_processes 4 run
 Launch Command (Sweep):      python run_partial_distill_language.py --run_all --gpus_per_run 4 --arms A --alphas 0.1 0.2
 """
 
-from src.tools.partial_distill_langarith import partial_distill
+from src.tools.partial_distill_langarith import load_tokenizer, load_train_dataset, partial_distill
 from src.utils.paths import CACHE_DIR, DATASET_DIR, MODEL_DIR, USE_WANDB, WANDB_API_KEY
 from src.utils.run_names import (
     ARMS, KOR_TARGETS, STOP_MODES, SWEEP_ALPHAS, SWEEP_BETAS, SWEEP_SEEDS, FIXED_STEPS, TEACHER_LR,
@@ -232,6 +232,26 @@ def run_experiment(setup_id, alpha, beta, seed=None, arm='A', kor_targets='unifo
         random_target_counts_path=KOR_UNIGRAM_COUNTS if (arm_config['random_kor'] and kor_targets == 'unigram') else None,
     )
 
+def warm_cache(args):
+    """Build (or load) the datasets caches the sweep's runs read, in one process, then return. Run it once before
+    fanning out: file locks do not work across nodes. Packing depends on the teacher's tokenizer and the arm's train
+    files; interleaving also on the seed; validation on neither."""
+    current_setup = setups[SETUPS_TO_RUN[0]]
+    teacher = model_path('unlearn', args.teacher_lr)
+    accelerator = Accelerator(cpu=True)  # only builds datasets; nothing runs on it
+    get_korean_and_english_evalaution_fn(
+        model_name=teacher, max_length=current_setup['max_length'],
+        eng_valid_file=current_setup['eng_valid_file'], kor_valid_file=current_setup['kor_valid_file'],
+        dataset_cache_dir=current_setup['dataset_cache_dir'], cache_dir=current_setup['cache_dir'],
+        batch_size=current_setup['batch_size'], accelerator=accelerator)
+    tokenizer = load_tokenizer(teacher, current_setup['cache_dir'])
+    for domains, seed in sorted({(tuple(ARM_CONFIGS[arm]['domains']), seed) for arm in args.arms for seed in args.seeds}):
+        train_ds = load_train_dataset([TRAIN_FILES[d] for d in domains], tokenizer, current_setup['max_length'], True,
+                                      [1.0 / len(domains)] * len(domains), seed, 'first_exhausted',
+                                      current_setup['dataset_cache_dir'])
+        print(f"[run_partial_distill_language.py] datasets cache ready: {'+'.join(domains)}, seed {seed}, "
+              f"{len(train_ds)} rows")
+
 def experiment_cli_args(experiment):
     setup_id, alpha, beta, seed, arm, kor_targets, stop_mode, fixed_steps, max_steps, teacher_lr = experiment
     cmd = ["--setup", setup_id, "--alpha", str(alpha), "--beta", str(beta), "--seed", str(seed), "--arm", arm,
@@ -342,7 +362,13 @@ if __name__ == "__main__":
                              'the visible GPUs (4 = the paper). Unset: one run at a time with the default config')
     parser.add_argument('--shard', type=int, default=0, help='Sweep: run every num_shards-th experiment from here')
     parser.add_argument('--num_shards', type=int, default=1)
+    parser.add_argument('--warm_cache', action='store_true',
+                        help='Sweep: only build the datasets caches its runs read (one process, no GPU), then exit')
     args = parser.parse_args()
+
+    if args.warm_cache:
+        warm_cache(args)
+        raise SystemExit
 
     # If specific experiment parameters are provided, run that single experiment
     if args.alpha is not None and args.beta is not None:

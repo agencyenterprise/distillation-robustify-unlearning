@@ -125,9 +125,7 @@ def partial_distill(
         cache_dir=cache_dir,
         attn_implementation='eager' if "gemma" in teacher_model_name.lower() else 'sdpa'
     )
-    teacher_tokenizer = AutoTokenizer.from_pretrained(teacher_model_name, cache_dir=cache_dir)
-    if teacher_tokenizer.pad_token_id is None:
-        teacher_tokenizer.pad_token_id = teacher_tokenizer.eos_token_id
+    teacher_tokenizer = load_tokenizer(teacher_model_name, cache_dir)
 
     print_acc(f"[serum_original.py] Loading student model {student_model_name}", print_message)
     student_config = AutoConfig.from_pretrained(student_model_name, cache_dir=cache_dir)
@@ -159,31 +157,8 @@ def partial_distill(
     # ----------------------------------------------------------------
     # Rank 0 builds the datasets cache first; the other ranks then read it instead of racing to write it.
     with accelerator.main_process_first():
-        train_ds_list = []
-        for file in train_files:
-            print_acc(f"[distill.py] Loading train dataset from {file}", print_message)
-            train_ds = load_dataset("json", data_files=file, split="train", cache_dir=dataset_cache_dir)
-            train_ds_list.append(train_ds)
-        # ------------------------------------------------------------
-        # PROCESS FOR SEQUENCE LENGTH
-        # If join_or_subsequence, form sequences of exactly max_length 
-        # by joining multiple or using subsequences
-        # else filter for only those less than max_length
-        # ------------------------------------------------------------
-        train_ds_list, message = make_sequence_length(train_ds_list=train_ds_list, tokenizer=tokenizer, max_length=max_length, join_or_subsequence=join_or_subsequence)
-        print_acc(message, print_message)
-        # Tag each row with its source file, so the loop can pick targets and log loss per domain.
-        train_ds_list = [ds.add_column("domain", [i] * len(ds)) for i, ds in enumerate(train_ds_list)]
-
-
-        # Interleave dataset
-        if len(train_ds_list) == 0:
-            raise ValueError("No training dataset provided!")
-        elif len(train_ds_list) == 1:
-            train_ds = train_ds_list[0]
-        else:
-            print_acc(f"[serum_original.py] Interleaving with probabilities: {interleave_probs}", print_message)
-            train_ds = interleave_datasets(train_ds_list, probabilities=interleave_probs, seed=seed, stopping_strategy=stopping_strategy)
+        train_ds = load_train_dataset(train_files, tokenizer, max_length, join_or_subsequence, interleave_probs, seed,
+                                      stopping_strategy, dataset_cache_dir, print_message)
 
     # Print size
     print_acc(f"[serum_original.py] Train dataset size: {len(train_ds)}", print_message)
@@ -443,6 +418,46 @@ def partial_distill(
         unwrapped_student.save_pretrained(final_model_path)
         tokenizer.save_pretrained(final_model_path)
         print_acc(f"[serum_original.py] Saved final model => {final_model_path}", print_message)
+
+
+def load_tokenizer(name, cache_dir):
+    """As partial_distill() loads the teacher's tokenizer (the packing cache fingerprint depends on its state)."""
+    tokenizer = AutoTokenizer.from_pretrained(name, cache_dir=cache_dir)
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+    return tokenizer
+
+
+def load_train_dataset(train_files, tokenizer, max_length, join_or_subsequence, interleave_probs, seed,
+                       stopping_strategy, dataset_cache_dir, print_message=True):
+    """The packed, domain-tagged, interleaved train set (also builds its datasets cache; --warm_cache)."""
+    train_ds_list = []
+    for file in train_files:
+        print_acc(f"[distill.py] Loading train dataset from {file}", print_message)
+        train_ds = load_dataset("json", data_files=file, split="train", cache_dir=dataset_cache_dir)
+        train_ds_list.append(train_ds)
+    # ------------------------------------------------------------
+    # PROCESS FOR SEQUENCE LENGTH
+    # If join_or_subsequence, form sequences of exactly max_length 
+    # by joining multiple or using subsequences
+    # else filter for only those less than max_length
+    # ------------------------------------------------------------
+    train_ds_list, message = make_sequence_length(train_ds_list=train_ds_list, tokenizer=tokenizer, max_length=max_length, join_or_subsequence=join_or_subsequence)
+    print_acc(message, print_message)
+    # Tag each row with its source file, so the loop can pick targets and log loss per domain.
+    train_ds_list = [ds.add_column("domain", [i] * len(ds)) for i, ds in enumerate(train_ds_list)]
+
+
+    # Interleave dataset
+    if len(train_ds_list) == 0:
+        raise ValueError("No training dataset provided!")
+    elif len(train_ds_list) == 1:
+        train_ds = train_ds_list[0]
+    else:
+        print_acc(f"[serum_original.py] Interleaving with probabilities: {interleave_probs}", print_message)
+        train_ds = interleave_datasets(train_ds_list, probabilities=interleave_probs, seed=seed, stopping_strategy=stopping_strategy)
+    return train_ds
+
 
 ##############################################################
 # The do_corruption function is used for "noise-and-decay"

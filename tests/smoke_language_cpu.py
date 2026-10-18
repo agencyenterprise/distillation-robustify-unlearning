@@ -4,6 +4,7 @@ Runs: oracle pretraining (English only), partial distillation for every arm, and
 
     python tests/smoke_language_cpu.py      # from the repo root; takes a few minutes
 """
+import argparse
 import json
 import os
 import random
@@ -26,7 +27,7 @@ from tokenizers import Tokenizer, models  # noqa: E402
 from transformers import Gemma2Config, Gemma2ForCausalLM, PreTrainedTokenizerFast  # noqa: E402
 
 from src.utils.paths import DATASET_DIR, MODEL_DIR  # noqa: E402
-from src.utils.run_names import REFERENCE_MODELS, partial_distill_name  # noqa: E402
+from src.utils.run_names import REFERENCE_MODELS, TEACHER_LR, partial_distill_name  # noqa: E402
 
 VOCAB, SEQ = 300, 64
 
@@ -91,6 +92,9 @@ def main():
     pd.setups["gemma-2-0.1B_MaxEnt"].update(batch_size=2, gradient_accumulation_steps=2, validation_steps=2,
                                              max_length=SEQ, num_warmup_steps=1, device="cpu")
     runs = [(arm, "uniform", "fixed_steps") for arm in "ABCDEF"] + [("D", "unigram", "fixed_steps"), ("C", "uniform", "early")]
+    # --warm_cache builds every cache these runs read: they build none.
+    pd.warm_cache(argparse.Namespace(arms=list("ABCDEF"), seeds=[111], teacher_lr=TEACHER_LR))
+    warm = cache_files()
     for arm, kor_targets, stop_mode in runs:
         pd.run_experiment("gemma-2-0.1B_MaxEnt", 0.3, 0.1, 111, arm, kor_targets, stop_mode, fixed_steps=3, max_steps=4)
         name = partial_distill_name(arm, 0.3, 0.1, 111, stop_mode, 3, kor_targets)
@@ -99,6 +103,7 @@ def main():
         expected = {"A": {"eng", "kor"}, "B": {"eng"}, "C": {"eng"}, "D": {"eng", "kor"}, "E": {"eng", "kor"}, "F": {"eng", "kor"}}[arm]
         assert {k.split("_")[-1] for k in record if k.startswith("train/loss_tokens_")} == expected, record
         print(f"[smoke] arm {arm} {kor_targets} {stop_mode} OK: {record}")
+    assert cache_files() == warm, sorted(cache_files() - warm)
     # Rerun is a no-op.
     pd.run_experiment("gemma-2-0.1B_MaxEnt", 0.3, 0.1, 111, "A", "uniform", "fixed_steps", fixed_steps=3)
 
