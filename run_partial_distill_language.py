@@ -166,8 +166,11 @@ def run_experiment(setup_id, alpha, beta, seed=None, arm='A', kor_targets='unifo
         if max_steps is not None:
             raise ValueError("--max_steps does not apply to --stop_mode epoch (it would also shorten the schedule)")
         current_setup['epochs'] = epochs
-    elif max_steps is not None:
-        current_setup['max_steps'] = max_steps
+    else:
+        # Early stop: --epochs caps the run (and the cosine spans them); 1 is upstream's cap.
+        current_setup['epochs'] = epochs
+        if max_steps is not None:
+            current_setup['max_steps'] = max_steps
 
     # Update wandb run name
     if current_setup['wandb_run_name'] is None:
@@ -364,7 +367,7 @@ if __name__ == "__main__":
                              'cosine schedule, so leave it unset to match the paper (an epoch is the cap there)')
     parser.add_argument('--teacher_lr', type=float, default=TEACHER_LR,
                         help='MaxEnt teacher LR (default 8e-5, the paper\'s; upstream hard-coded 3e-5)')
-    parser.add_argument('--epochs', type=int, default=EPOCHS, help='epoch mode only: passes over the training data')
+    parser.add_argument('--epochs', type=int, default=EPOCHS, help='epoch mode: passes over the training data; early mode: the cap on passes (default 1)')
     parser.add_argument('--run_all', action='store_true', help='Run all experiments in the sweep')
     parser.add_argument('--start_alpha', type=float, default=None, help='Alpha value to start from (inclusive)')
     parser.add_argument('--arms', nargs='+', choices=ARMS, default=['A'], help='Sweep: arms')

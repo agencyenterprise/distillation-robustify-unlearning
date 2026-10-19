@@ -65,7 +65,8 @@ def stop_label(stop_mode, fixed_steps=FIXED_STEPS, epochs=EPOCHS):
         return f"fixed_steps_{fixed_steps}"
     if stop_mode == 'epoch':
         return f"epochs_{epochs}"
-    return 'early_stop'
+    # Early stop is capped at --epochs passes; the default 1 keeps calibration's names.
+    return 'early_stop' if epochs == 1 else f"early_stop_epochs_{epochs}"
 
 
 def fmt(x):

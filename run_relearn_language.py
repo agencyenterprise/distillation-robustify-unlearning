@@ -274,7 +274,7 @@ if __name__ == "__main__":
     parser.add_argument('--seeds', nargs='+', type=int, default=SWEEP_SEEDS)
     parser.add_argument('--stop_modes', nargs='+', choices=STOP_MODES, default=['fixed_steps'])
     parser.add_argument('--fixed_steps', type=int, default=FIXED_STEPS)
-    parser.add_argument('--epochs', type=int, default=EPOCHS, help='Partial models of --stop_modes epoch: their epochs')
+    parser.add_argument('--epochs', type=int, default=EPOCHS, help='Partial models of --stop_modes epoch (their epochs) or early (their cap on passes; default 1)')
     parser.add_argument('--teacher_lr', type=float, default=TEACHER_LR,
                         help='MaxEnt teacher LR of the unlearn/full_distill refs and partial models (default 8e-5)')
     parser.add_argument('--lrs', nargs='+', type=float, default=LRS_TO_RUN)
