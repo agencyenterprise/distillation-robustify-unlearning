@@ -42,7 +42,7 @@ def reference_models(teacher_lr=TEACHER_LR):
 
 REFERENCE_MODELS = reference_models()   # at the default teacher LR
 
-ARMS = ['A', 'B', 'C', 'D', 'E', 'F']
+ARMS = ['A', 'B', 'C', 'D', 'E', 'F', 'G']
 RANDOM_TARGET_ARMS = ['D', 'E']   # these take --kor_targets
 KOR_TARGETS = ['uniform', 'unigram']
 STOP_MODES = ['fixed_steps', 'early', 'epoch']
