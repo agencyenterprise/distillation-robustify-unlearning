@@ -3,7 +3,7 @@ Configured for a (any)xH200 GPU server.
 
 Launch Command: python run_relearn_language.py
 AGI-2569:       python run_relearn_language.py --groups refs partial --arms A C --lrs 1e-4 1e-5 [--teacher_lr 8e-5]
-                    [--eval_every 25] [--students random_init] [--shard i --num_shards n] [--list]
+                    [--eval_every 25] [--shard i --num_shards n] [--list]
 """
 import argparse
 import json
@@ -18,7 +18,7 @@ from utils.loss_functions import print_acc
 from utils.validation_functions import get_korean_and_english_evalaution_fn
 from utils.parallel_launch import launch_in_parallel_one_per_gpu, get_parallel_launch_wrapper
 from src.utils.run_names import (
-    REFERENCE_MODELS, ARMS, EPOCHS, RANDOM_TARGET_ARMS, KOR_TARGETS, STOP_MODES, STUDENTS, SWEEP_ALPHAS, SWEEP_BETAS, SWEEP_SEEDS,
+    REFERENCE_MODELS, ARMS, EPOCHS, RANDOM_TARGET_ARMS, KOR_TARGETS, STOP_MODES, SWEEP_ALPHAS, SWEEP_BETAS, SWEEP_SEEDS,
     FIXED_STEPS, RELEARN_EVAL_EVERY, TEACHER_LR, partial_distill_name, reference_models, relearn_run_name,
 )
 
@@ -252,17 +252,14 @@ def agi2569_models(args):
     if 'refs' in args.groups:
         models += [reference_models(args.teacher_lr)[role] for role in args.refs]
     if 'partial' in args.groups:
-        for student in args.students:
-            for arm in args.arms:
-                for kor_targets in (args.kor_targets if arm in RANDOM_TARGET_ARMS else ['uniform']):
-                    # A random-init student is not noised: one model, whatever the alphas and betas.
-                    for alpha in (args.alphas if student == 'arm' else [0.0]):
-                        for beta in (args.betas if student == 'arm' else args.betas[:1]):
-                            for seed in args.seeds:
-                                for stop_mode in args.stop_modes:
-                                    models.append(partial_distill_name(
-                                        arm, alpha, beta, seed, stop_mode, args.fixed_steps, kor_targets,
-                                        args.teacher_lr, args.epochs, student))
+        for arm in args.arms:
+            for kor_targets in (args.kor_targets if arm in RANDOM_TARGET_ARMS else ['uniform']):
+                for alpha in args.alphas:
+                    for beta in args.betas:
+                        for seed in args.seeds:
+                            for stop_mode in args.stop_modes:
+                                models.append(partial_distill_name(arm, alpha, beta, seed, stop_mode, args.fixed_steps,
+                                                                   kor_targets, args.teacher_lr, args.epochs))
     return models
 
 if __name__ == "__main__":
@@ -277,8 +274,6 @@ if __name__ == "__main__":
     parser.add_argument('--seeds', nargs='+', type=int, default=SWEEP_SEEDS)
     parser.add_argument('--stop_modes', nargs='+', choices=STOP_MODES, default=['fixed_steps'])
     parser.add_argument('--fixed_steps', type=int, default=FIXED_STEPS)
-    parser.add_argument('--students', nargs='+', choices=STUDENTS, default=['arm'],
-                        help='Partial models by student: arm (noised, per alpha) or random_init (full reset, no alpha)')
     parser.add_argument('--epochs', type=int, default=EPOCHS, help='Partial models of --stop_modes epoch (their epochs) or early (their cap on passes; default 1)')
     parser.add_argument('--teacher_lr', type=float, default=TEACHER_LR,
                         help='MaxEnt teacher LR of the unlearn/full_distill refs and partial models (default 8e-5)')

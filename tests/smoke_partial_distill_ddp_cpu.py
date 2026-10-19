@@ -3,9 +3,7 @@ CPU check of partial distillation under 2-process DDP (gloo), the geometry the c
 Checks: the noised student is identical on every rank before the DDP wrap; records are written once; tokens_seen
 counts every rank; the LR schedule advances num_processes ticks per optimizer step (accelerate's prepared scheduler,
 so upstream's total_steps, computed from the unsharded loader, is in ticks); fixed-step and early-stop runs end
-together on all ranks; epoch mode runs every epoch with the cosine over all of them; a full-reset run
-(student random_init) starts from the saved random init, is not noised, and still records the teacher baseline;
-a rerun is skipped.
+together on all ranks; epoch mode runs every epoch with the cosine over all of them; a rerun is skipped.
 
     python tests/smoke_partial_distill_ddp_cpu.py      # from the repo root; launches itself with torchrun
 """
@@ -42,7 +40,7 @@ from tokenizers import Tokenizer, models  # noqa: E402
 from transformers import Gemma2Config, Gemma2ForCausalLM, PreTrainedTokenizerFast  # noqa: E402
 
 from src.utils.paths import DATASET_DIR, MODEL_DIR  # noqa: E402
-from src.utils.run_names import RANDOM_INIT_MODEL, REFERENCE_MODELS, partial_distill_name  # noqa: E402
+from src.utils.run_names import REFERENCE_MODELS, partial_distill_name  # noqa: E402
 
 VOCAB, SEQ = 300, 64
 
@@ -77,7 +75,6 @@ if state.is_main_process:
         make_jsonl(f"{DATASET_DIR}/pretrain/{split}_kor.jsonl", n, 150, VOCAB)
     make_model_dir(f"{MODEL_DIR}/{REFERENCE_MODELS['base']}/final_model", seed=1)
     make_model_dir(f"{MODEL_DIR}/{REFERENCE_MODELS['unlearn']}/final_model", seed=2)
-    make_model_dir(f"{MODEL_DIR}/{RANDOM_INIT_MODEL}", seed=3)
 state.wait_for_everyone()
 
 import run_partial_distill_language as pd  # noqa: E402
@@ -142,47 +139,6 @@ for arm, stop_mode in (("A", "fixed_steps"), ("D", "fixed_steps"), ("C", "early"
         assert os.path.exists(f"{MODEL_DIR}/{name}/final_model/config.json")
         print(f"[ddp smoke] arm {arm} {stop_mode} OK: {len(steps)} steps, {train[-1]['train/tokens_seen']} tokens, "
               f"noised checksum {sums[0]:.6f} on all ranks", flush=True)
-
-# Full reset: the student is the saved random init, not noised; the teacher is still evaluated as the reference.
-loaded = []
-_from_pretrained = tool.AutoModelForCausalLM.from_pretrained
-def recording_from_pretrained(name, *args, **kwargs):
-    loaded.append(name)
-    return _from_pretrained(name, *args, **kwargs)
-tool.AutoModelForCausalLM.from_pretrained = recording_from_pretrained
-for arm, epochs in (("B", 2), ("D", 1)):
-    before = len(noised)
-    loaded.clear()
-    pd.run_experiment("gemma-2-0.1B_MaxEnt", 0.0, 0.1, 111, arm, "uniform", "epoch", epochs=epochs,
-                      student="random_init")
-    state.wait_for_everyone()
-    assert len(noised) == before, "a random-init student must not be noised"
-    assert loaded == [pd.model_path("unlearn"), f"{MODEL_DIR}/{RANDOM_INIT_MODEL}"], loaded
-    if state.is_main_process:
-        name = partial_distill_name(arm, 0.0, 0.1, 111, "epoch", epochs=epochs, student="random_init")
-        assert "student_random_init" in name and "alpha_" not in name, name
-        with open(f"{MODEL_DIR}/local_records/{name}.txt") as f:
-            records = [json.loads(line) for line in f]
-        stages = [r.get("validation_stage") for r in records if "validation_stage" in r]
-        assert stages[0] == "teacher_baseline" and stages[-1] == "final_student", stages
-        train = [r for r in records if "train/lr" in r]
-        domains = ["eng"] if arm == "B" else ["eng", "kor"]
-        teacher_tokenizer = tool.load_tokenizer(pd.model_path("unlearn"), None)
-        rows = len(tool.load_train_dataset([pd.TRAIN_FILES[d] for d in domains], teacher_tokenizer, SEQ, True,
-                                           [1.0 / len(domains)] * len(domains), 111, "first_exhausted",
-                                           os.environ["CACHE_DIR"], False))
-        assert len(train) == epochs * (math.ceil(math.ceil(rows / BATCH) / NPROC) // ACCUM), (len(train), rows)
-        checks = [r for r in records if r.get("validation_stage") == "training_student"]
-        assert os.path.exists(f"{MODEL_DIR}/{name}/final_model/config.json")
-        print(f"[ddp smoke] arm {arm} random_init epoch OK: {len(train)} steps, English "
-              f"{checks[0]['val/eng_ce_loss']:.3f} -> {records[-1]['val/eng_ce_loss']:.3f} "
-              f"(teacher {records[0]['val/eng_ce_loss']:.3f})", flush=True)
-try:
-    pd.run_experiment("gemma-2-0.1B_MaxEnt", 0.3, 0.1, 111, "C", "uniform", "epoch", student="random_init")
-    raise AssertionError("alpha != 0 with a random-init student must be refused")
-except ValueError:
-    pass
-tool.AutoModelForCausalLM.from_pretrained = _from_pretrained
 
 # A rerun is skipped on every rank (no hang, no new noising).
 before = len(noised)
