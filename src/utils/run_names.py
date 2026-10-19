@@ -42,10 +42,16 @@ def reference_models(teacher_lr=TEACHER_LR):
 
 REFERENCE_MODELS = reference_models()   # at the default teacher LR
 
+# The saved random init that full distillation's student starts from (no final_model subdirectory).
+RANDOM_INIT_MODEL = 'random_init_models/gemma-2-0.1B'
+
 ARMS = ['A', 'B', 'C', 'D', 'E', 'F']
 RANDOM_TARGET_ARMS = ['D', 'E']   # these take --kor_targets
 KOR_TARGETS = ['uniform', 'unigram']
 STOP_MODES = ['fixed_steps', 'early', 'epoch']
+# 'arm': the arm's own student (ARM_CONFIGS: the unlearned teacher, or base for E), noised at alpha.
+# 'random_init': the full-distillation student (RANDOM_INIT_MODEL), not noised; alpha must be 0 and is not in the name.
+STUDENTS = ['arm', 'random_init']
 
 SWEEP_ALPHAS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
 SWEEP_BETAS = [0.1]
@@ -75,10 +81,12 @@ def fmt(x):
 
 
 def partial_distill_name(arm, alpha, beta, seed, stop_mode='fixed_steps', fixed_steps=FIXED_STEPS, kor_targets='uniform',
-                         teacher_lr=TEACHER_LR, epochs=EPOCHS):
+                         teacher_lr=TEACHER_LR, epochs=EPOCHS, student='arm'):
+    """student 'random_init' (the full-reset runs) replaces the alpha and beta fields with '-student_random_init'."""
+    noise = f"-alpha_{fmt(alpha)}-beta_{fmt(beta)}" if student == 'arm' else f"-student_{student}"
     return (f"partial_distill_models/gemma-2-0.1B-language-partial_distill-teacher_lr_{lr_tag(teacher_lr)}"
             f"-arm_{arm_label(arm, kor_targets)}"
-            f"-alpha_{fmt(alpha)}-beta_{fmt(beta)}-seed_{seed}-{stop_label(stop_mode, fixed_steps, epochs)}")
+            f"{noise}-seed_{seed}-{stop_label(stop_mode, fixed_steps, epochs)}")
 
 
 def relearn_record_dir(model):
