@@ -46,7 +46,7 @@ def plot_paper_curve(ax, points, color, label):
 # Fixed categorical order (dataviz reference palette); an arm keeps its colour in every figure.
 ARM_STYLE = {
     "A": ("#2a78d6", "o"), "B": ("#eb6834", "s"), "C": ("#1baf7a", "^"), "D_uniform": ("#eda100", "D"),
-    "D_unigram": ("#e87ba4", "v"), "E_uniform": ("#008300", "P"), "E_unigram": ("#4a3aa7", "X"), "F": ("#e34948", "*"),
+    "D_unigram": ("#e87ba4", "v"), "E_uniform": ("#008300", "P"), "E_unigram": ("#4a3aa7", "X"), "F": ("#e34948", "*"), "G": ("#7f7f7f", "h"),
 }
 REF_STYLE = {  # references in ink tones, distinguished by dash and label
     "base": ("#0b0b0b", ":", "pretrained base"), "unlearn": ("#52514e", "--", "MaxEnt unlearned"),

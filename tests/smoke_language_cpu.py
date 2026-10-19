@@ -100,7 +100,7 @@ def main():
         name = partial_distill_name(arm, 0.3, 0.1, 111, stop_mode, 3, kor_targets)
         assert os.path.exists(f"{MODEL_DIR}/{name}/final_model/config.json"), name
         record = last_record(f"{MODEL_DIR}/local_records/{name}.txt", "train/loss_")
-        expected = {"A": {"eng", "kor"}, "B": {"eng"}, "C": {"eng"}, "D": {"eng", "kor"}, "E": {"eng", "kor"}, "F": {"eng", "kor"}}[arm]
+        expected = {"A": {"eng", "kor"}, "B": {"eng"}, "C": {"eng"}, "D": {"eng", "kor"}, "E": {"eng", "kor"}, "F": {"eng"}, "G": {"eng", "kor"}}[arm]
         assert {k.split("_")[-1] for k in record if k.startswith("train/loss_tokens_")} == expected, record
         print(f"[smoke] arm {arm} {kor_targets} {stop_mode} OK: {record}")
     assert cache_files() == warm, sorted(cache_files() - warm)

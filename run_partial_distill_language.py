@@ -7,8 +7,8 @@ Every arm noises the student once, (1 - alpha) * theta + alpha * beta * N, then 
   C  CE on real labels, English only (no teacher forward pass)
   D  CE: English rows on real labels, Korean rows on real inputs with random targets (--kor_targets)
   E  as D, but the student starts from the pretrained base model instead of the MaxEnt-unlearned one
-  F  CE on real labels, English + Korean (sanity check: should relearn Korean)
-  G  as C, but the student starts from the pretrained base model (no unlearning)
+  F  as C, but the student starts from the pretrained base model (no unlearning)
+  G  CE on real labels, English + Korean (sanity check: should relearn Korean)
 The teacher is always the MaxEnt-unlearned model, at --teacher_lr (default 8e-5, the paper's; upstream hard-coded
 3e-5). The LR is part of every run name. In C-F it is evaluated once, as the reference for the
 early-stop condition, and never run during training.
@@ -71,8 +71,8 @@ ARM_CONFIGS = {
     'C': {'domains': ['eng'],        'loss_type': 'ce', 'random_kor': False, 'student': 'unlearn'},
     'D': {'domains': ['eng', 'kor'], 'loss_type': 'ce', 'random_kor': True,  'student': 'unlearn'},
     'E': {'domains': ['eng', 'kor'], 'loss_type': 'ce', 'random_kor': True,  'student': 'base'},
-    'F': {'domains': ['eng', 'kor'], 'loss_type': 'ce', 'random_kor': False, 'student': 'unlearn'},
-    'G': {'domains': ['eng'],        'loss_type': 'ce', 'random_kor': False, 'student': 'base'},
+    'F': {'domains': ['eng'],        'loss_type': 'ce', 'random_kor': False, 'student': 'base'},
+    'G': {'domains': ['eng', 'kor'], 'loss_type': 'ce', 'random_kor': False, 'student': 'unlearn'},
 }
 TRAIN_FILES = {'eng': ENG_TRAIN_FILE, 'kor': KOR_TRAIN_FILE}
 

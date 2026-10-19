@@ -56,7 +56,7 @@ RELEARN_EVAL_EVERY = 5    # upstream's relearn validation interval (steps)
 
 
 def arm_label(arm, kor_targets='uniform'):
-    """'A'..'F', with the Korean target distribution appended for D and E (e.g. 'D_unigram')."""
+    """'A'..'G', with the Korean target distribution appended for D and E (e.g. 'D_unigram')."""
     return f"{arm}_{kor_targets}" if arm in RANDOM_TARGET_ARMS else arm
 
 

@@ -146,7 +146,7 @@ arm's one-epoch cap with a margin: B (KL, English only) <=509 steps, C <=509, D 
 "Expected" assumes each arm stops where arm A did (1-800 steps, 2,551 in all), capped at its epoch. At the 16-GPU
 weekday cap that is ~11-13 h of wall clock with an empty queue.
 
-Wave 2, later: arm E, arm D with unigram targets, and arm F at two alphas.
+Wave 2: arm E (D from the base model), arm F (C from the base model), arm G (sanity: CE on English + Korean) at two alphas; arm D with unigram targets later.
 
 ## GPU geometry per stage
 
