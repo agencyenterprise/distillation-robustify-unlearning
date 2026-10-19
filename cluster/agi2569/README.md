@@ -148,6 +148,47 @@ weekday cap that is ~11-13 h of wall clock with an empty queue.
 
 Wave 2, later: arm E, arm D with unigram targets, and arm F at two alphas.
 
+## Phase 2: full-reset arms B, C, D (Fig 4)
+
+The Fig 4 analogue of arms B, C and D: the student is full distillation's saved random init
+(`random_init_models/gemma-2-0.1B`, not noised; `--student random_init --alphas 0.0`), trained for full
+distillation's step budget in epoch mode (no early stop): B and C two epochs of English (~822 steps), D one epoch of
+English + Korean (~807). Arm A at full reset is the full-distillation reference. The run name has
+`-student_random_init` in place of the alpha and beta fields. The teacher is still evaluated once, as the reference;
+C and D never run it during training. One run per array task.
+
+```bash
+mkdir -p /mnt/polished-lake/home/allegralaro/agi-2569/logs
+J=cluster/agi2569
+PD="--gpus=4 --cpus-per-task=80 --mem-per-gpu=96G"   # one partial-distill run per task: half a node
+RL="--gpus=1 --cpus-per-task=20 --mem-per-gpu=96G"   # one relearn run per task
+R="--alphas 0.0 --student random_init --stop_mode epoch"
+
+# 0. Datasets caches (loads only: packing uses the teacher's tokenizer, so Wave 1's B/C/D caches apply)
+warm_pd=$(sbatch --parsable $J/warm_cache.sbatch run_partial_distill_language.py --arms B C D)
+
+# 1. Full-reset retraining (task 0 = B, task 1 = C; D on its own)
+pd_bc=$(sbatch --parsable -d afterok:$warm_pd $PD --time=06:00:00 --array=0-1 $J/partial_distill.sbatch --arms B C $R --epochs 2)
+pd_d=$(sbatch --parsable -d afterok:$warm_pd $PD --time=06:00:00 --array=0 $J/partial_distill.sbatch --arms D --kor_targets uniform $R --epochs 1)
+
+# 2. Relearning, 10 attacker LRs per model, validation every 25 steps (B/C: task i = LR i // 2, arm i % 2)
+sbatch -d afterok:$pd_bc $RL --time=01:00:00 --array=0-19 $J/relearn.sbatch --groups partial --arms B C --students random_init --stop_modes epoch --epochs 2 --eval_every 25
+sbatch -d afterok:$pd_d $RL --time=01:00:00 --array=0-9 $J/relearn.sbatch --groups partial --arms D --kor_targets uniform --students random_init --stop_modes epoch --epochs 1 --eval_every 25
+
+# 3. When done
+bash $J/sync_s3.sh
+```
+
+Runs: 3 retrainings (12 GPUs), then 30 relearns. Time limit: full distillation (KL, English + Korean) ran 808 steps
+in 4 h 26 min on 4 GPUs, ~20 s per step all in; B is KL at ~822 steps (~4.5 h), C and D are CE (no teacher forward)
+at ~822 and ~807 steps, so 6 h covers each with a margin. About 3 x 4 GPUs x 4-4.5 h = ~50 GPU-h, plus ~10 for
+relearning. Preview the relearn lists with `--list`.
+
+Two differences from full distillation's recipe (`run_distill_language.py`) remain: weight decay 0 (partial
+distillation's) against 0.1, and the LR schedule. Here the cosine spans the epochs; full distillation's
+`max_steps` 1000 counts scheduler ticks (4 per optimizer step on 4 GPUs), so its cosine reaches `min_lr` at step
+250 and then cycles (its record: 7e-4 at step 250, 9e-4 at 500).
+
 ## GPU geometry per stage
 
 Conclusion: match upstream at every stage. Each stage below gives the evidence: the paper is arXiv 2506.06278v3,
