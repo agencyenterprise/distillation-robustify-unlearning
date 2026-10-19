@@ -52,7 +52,7 @@ from src.utils.run_names import (  # noqa: E402
 DEFINITIONS = ("min_any_step", "min_final")
 KL_ARMS = ("A", "B")
 PARTIAL_RE = re.compile(
-    r"partial_distill-teacher_lr_(?P<teacher_lr>[\d.e+-]+)-arm_(?P<arm>[A-F](?:_uniform|_unigram)?)"
+    r"partial_distill-teacher_lr_(?P<teacher_lr>[\d.e+-]+)-arm_(?P<arm>[A-G](?:_uniform|_unigram)?)"
     r"-alpha_(?P<alpha>[\d.]+)-beta_(?P<beta>[\d.]+)-seed_(?P<seed>\d+)-(?P<stop>fixed_steps_\d+|early_stop_epochs_\d+|early_stop|epochs_\d+)$"
 )
 RECORD_RE = re.compile(r"^(?P<lr>[^_]+)(?:_eval_every_(?P<eval_every>\d+))?_only_forget_data\.txt$")
