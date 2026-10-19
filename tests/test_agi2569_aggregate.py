@@ -152,6 +152,27 @@ def test_epoch_mode_run(records, tmp_path):
     assert plot.alpha0_label("C", "epochs_2").startswith("unlearn + CE fine-tune on English, 2 epochs")
 
 
+def test_random_init_student_run(records, tmp_path):
+    # Full reset: no alpha or beta in the name, its own model apart from the alpha-0 run, student 'random_init'.
+    d = partial_distill_name("D", 0.0, 0.1, 111, "epoch", epochs=1, student="random_init")
+    assert d.endswith("-arm_D_uniform-student_random_init-seed_111-epochs_1")
+    assert partial_distill_name("C", 0.0, 0.1, 111, "epoch", epochs=2, student="random_init") != \
+        partial_distill_name("C", 0.0, 0.1, 111, "epoch", epochs=2)
+    relearn(records, d, 1e-4, {0: 12.0, 25: 6.5, 500: 6.0}, eval_every=25)
+    write(f"{records}/{d}.txt", [{"train/tokens_seen": 1600, "train/step": 807}])
+    curves, summary = aggregate.aggregate(records)
+    r = row(summary[summary.student == "random_init"], "D_uniform", "min_final")
+    assert (r.stop, r.relearned_kor_loss, r.train_steps) == ("epochs_1", 6.0, 807)
+    assert r.alpha != r.alpha and r.beta != r.beta   # nan: not noised
+    assert set(summary[summary.role == "partial"].student) == {"arm", "random_init"}
+    env = aggregate.worst_case_curve(curves)
+    assert env[env.student == "random_init"].set_index("step").kor_loss.to_dict() == {0: 12.0, 25: 6.5, 500: 6.0}
+    out = str(tmp_path / "out")
+    os.makedirs(out)
+    plot.fig4(curves, out)
+    plot.fig5(summary, out, "min_final", "early_stop", "steps")
+
+
 def test_teacher_lr_in_every_downstream_path():
     assert TEACHER_LR == 8e-5
     refs3, refs8 = reference_models(3e-5), reference_models(8e-5)

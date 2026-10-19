@@ -33,6 +33,8 @@ Definitions
   `relearn_finished`). Truncated or missing LRs (of the paper's 10, ATTACK_LRS) are dropped from the worst case and
   envelope, and the model is marked `provisional` (`lrs_incomplete` lists them). `robustness_provisional` is set
   when the model or either normalisation reference is provisional.
+- Full-reset runs (`-student_random_init` in the name; run_partial_distill_language.py --student random_init) have
+  student 'random_init' and no alpha or beta; every other partial run has student 'arm'.
 - MaxEnt sweep check (`maxent_sweep_check`, maxent_sweep.csv): final English / Korean validation loss of each
   unlearning LR against App. B.1's table (paper_targets.json, scalars.maxent_final).
 """
@@ -53,7 +55,8 @@ DEFINITIONS = ("min_any_step", "min_final")
 KL_ARMS = ("A", "B")
 PARTIAL_RE = re.compile(
     r"partial_distill-teacher_lr_(?P<teacher_lr>[\d.e+-]+)-arm_(?P<arm>[A-F](?:_uniform|_unigram)?)"
-    r"-alpha_(?P<alpha>[\d.]+)-beta_(?P<beta>[\d.]+)-seed_(?P<seed>\d+)-(?P<stop>fixed_steps_\d+|early_stop_epochs_\d+|early_stop|epochs_\d+)$"
+    r"(?:-alpha_(?P<alpha>[\d.]+)-beta_(?P<beta>[\d.]+)|-student_(?P<student>random_init))"
+    r"-seed_(?P<seed>\d+)-(?P<stop>fixed_steps_\d+|early_stop_epochs_\d+|early_stop|epochs_\d+)$"
 )
 RECORD_RE = re.compile(r"^(?P<lr>[^_]+)(?:_eval_every_(?P<eval_every>\d+))?_only_forget_data\.txt$")
 ATTACK_LRS = (1e-3, 7e-4, 4e-4, 1e-4, 7e-5, 5e-5, 1e-5, 7e-6, 4e-6, 1e-6)  # run_relearn_language.py LRS_TO_RUN
@@ -71,12 +74,15 @@ def describe_model(record_dir, teacher_lr=TEACHER_LR):
     ref_dirs = {relearn_record_dir(path): role for role, path in reference_models(teacher_lr).items()}
     if record_dir in ref_dirs:
         return {"model": record_dir, "role": ref_dirs[record_dir], "arm": None, "alpha": None, "beta": None,
-                "seed": None, "stop": None}
+                "seed": None, "stop": None, "student": None}
     match = PARTIAL_RE.search(record_dir)
     if match is None or match["teacher_lr"] != lr_tag(teacher_lr):
         return None
-    return {"model": record_dir, "role": "partial", "arm": match["arm"], "alpha": float(match["alpha"]),
-            "beta": float(match["beta"]), "seed": int(match["seed"]), "stop": match["stop"]}
+    # student: 'random_init' for a full-reset run (no alpha or beta: not noised), else 'arm'.
+    noised = match["student"] is None
+    return {"model": record_dir, "role": "partial", "arm": match["arm"],
+            "alpha": float(match["alpha"]) if noised else None, "beta": float(match["beta"]) if noised else None,
+            "seed": int(match["seed"]), "stop": match["stop"], "student": match["student"] or "arm"}
 
 
 def load_relearn_curves(records_root, teacher_lr=TEACHER_LR):
@@ -140,7 +146,7 @@ def worst_case(curves):
     curves = _complete(curves)
     rows = []
     for model, group in curves.groupby("model"):
-        meta = group.iloc[0][["model", "role", "arm", "alpha", "beta", "seed", "stop"]].to_dict()
+        meta = group.iloc[0][["model", "role", "arm", "alpha", "beta", "seed", "stop", "student"]].to_dict()
         meta["eval_every"] = group.eval_every.max()
         start = group[group.step == 0]
         before = {"kor_loss_before": start.kor_loss.mean(), "eng_loss_before": start.eng_loss.mean()}
@@ -161,7 +167,8 @@ def worst_case_curve(curves):
     curves = curves[curves.complete]
     n_lrs = curves.groupby("model").lr.transform("nunique")
     curves = curves[curves.groupby(["model", "step"]).lr.transform("nunique") == n_lrs]
-    return curves.groupby(["model", "role", "arm", "alpha", "stop", "step"], dropna=False).kor_loss.min().reset_index()
+    return (curves.groupby(["model", "role", "arm", "alpha", "stop", "student", "step"], dropna=False).kor_loss.min()
+            .reset_index())
 
 
 def add_robustness(summary):
