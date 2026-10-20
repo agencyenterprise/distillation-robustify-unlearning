@@ -70,6 +70,7 @@ def partial_distill(
     domain_names=None,
     random_target_domain=None,
     random_target_counts_path=None,
+    schedule_over_max_steps=False,
 ):
     """
     Distillation script using Accelerate. Replaces standard CE with forward KL (KL(teacher||student)).
@@ -86,6 +87,12 @@ def partial_distill(
                                 of their real next tokens (inputs stay real).
       random_target_counts_path token counts (torch.save'd 1-D tensor) to sample random targets from;
                                 None samples uniformly over the vocabulary.
+      schedule_over_max_steps   False (upstream): total_steps is counted in scheduler ticks, and accelerate's
+                                prepared scheduler advances num_processes ticks per optimizer step, so under
+                                N processes a max_steps cosine ends at max_steps / N and then cycles.
+                                True (fixed-steps mode): the cosine spans exactly max_steps optimizer steps on
+                                any process count and reaches min_lr at the last one; the warmup stays
+                                num_warmup_steps ticks (12.5 optimizer steps on 4 processes, as in early mode).
     """
     assert loss_type in ("kl", "ce"), loss_type
     assert random_target_domain is None or loss_type == "ce", "random targets need loss_type='ce'"
@@ -183,6 +190,9 @@ def partial_distill(
     total_steps = effective_steps_per_epoch * epochs
     if max_steps > 0:
         total_steps = min(total_steps, max_steps)
+    if schedule_over_max_steps:
+        assert max_steps > 0, "schedule_over_max_steps needs max_steps"
+        total_steps = max_steps * accelerator.num_processes  # in ticks: num_processes per optimizer step
     print_acc(f"[serum_original.py] {steps_per_epoch} steps/epoch, total steps: {total_steps}", print_message)
 
 

@@ -13,7 +13,8 @@ The teacher is always the MaxEnt-unlearned model, at --teacher_lr (default 8e-5,
 3e-5). The LR is part of every run name. In C-F it is evaluated once, as the reference for the
 early-stop condition, and never run during training.
 
-Stopping: --stop_mode fixed_steps (default; --fixed_steps 500, as in the paper's relearn model names),
+Stopping: --stop_mode fixed_steps (default; exactly --fixed_steps optimizer steps, default 500 as in the paper's relearn
+model names, crossing epochs if needed; warmup + cosine to min_lr over exactly those steps on any GPU count),
 --stop_mode early (upstream: stop once English validation loss is within 5% of the teacher's; at most one epoch), or
 --stop_mode epoch (train --epochs full passes, default 1, with no early stop; the cosine spans them, as early mode's
 spans its epoch). Epoch mode is for runs that early stop would end at once, e.g. arm C at alpha 0.
@@ -162,7 +163,10 @@ def run_experiment(setup_id, alpha, beta, seed=None, arm='A', kor_targets='unifo
     current_setup['noise_alpha'] = alpha
     current_setup['noise_beta'] = beta
     if stop_mode == 'fixed_steps':
+        # Exactly fixed_steps optimizer steps, crossing into further epochs if one is shorter (the loop stops at
+        # max_steps), with the cosine over exactly those steps (schedule_over_max_steps).
         current_setup['max_steps'] = fixed_steps
+        current_setup['epochs'] = 1000
     elif stop_mode == 'epoch':
         # No step cap (max_steps -1): total_steps, and so the cosine, span all the epochs, as in early mode.
         if max_steps is not None:
@@ -242,6 +246,7 @@ def run_experiment(setup_id, alpha, beta, seed=None, arm='A', kor_targets='unifo
         domain_names=domains,
         random_target_domain='kor' if arm_config['random_kor'] else None,
         random_target_counts_path=KOR_UNIGRAM_COUNTS if (arm_config['random_kor'] and kor_targets == 'unigram') else None,
+        schedule_over_max_steps=(stop_mode == 'fixed_steps'),
     )
 
 def arrow_files():

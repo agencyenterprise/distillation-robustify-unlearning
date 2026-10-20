@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(ROOT, "analysis", "agi2569"))
 import aggregate  # noqa: E402
 import plot  # noqa: E402
 from src.utils.run_names import (  # noqa: E402
-    REFERENCE_MODELS, TEACHER_LR, partial_distill_name, reference_models, relearn_record_dir, relearn_run_name,
+    REFERENCE_MODELS, TEACHER_LR, arm_label, partial_distill_name, reference_models, relearn_record_dir, relearn_run_name,
     unlearned_model,
 )
 
@@ -194,3 +194,16 @@ def test_maxent_sweep_check(tmp_path):
     assert sweep.loc[8e-5, "kor_diff"] == pytest.approx(12.5 - 12.3808)
     assert sweep.loc[3e-5, "paper_kor_loss"] == 11.9844
     assert sweep.loc[3e-5, "eng_loss"] != sweep.loc[3e-5, "eng_loss"]   # missing record -> nan
+
+
+def test_fixed_compute_names(records):
+    """Fixed-compute check: KL arms at 302 steps, CE arms at 403, relearn validating every 20 steps."""
+    for arm, steps, kor in (("A", 302, "uniform"), ("D", 403, "uniform"), ("F", 403, "uniform")):
+        name = partial_distill_name(arm, 0.6, 0.1, 111, "fixed_steps", steps, kor)
+        assert name.endswith(f"-fixed_steps_{steps}")
+        meta = aggregate.describe_model(relearn_record_dir(name))
+        assert (meta["arm"], meta["alpha"], meta["stop"]) == (arm_label(arm, kor), 0.6, f"fixed_steps_{steps}"), meta
+        relearn(records, name, 1e-4, {s: 5.0 for s in range(0, 501, 20)}, eval_every=20)
+    curves = aggregate.load_relearn_curves(records)
+    fixed = curves[curves.stop.isin(["fixed_steps_302", "fixed_steps_403"])]
+    assert set(fixed.eval_every) == {20} and fixed.step.max() == 500 and 40 in set(fixed.step)

@@ -2,8 +2,9 @@
 CPU check of partial distillation under 2-process DDP (gloo), the geometry the cluster runs with 4 GPUs.
 Checks: the noised student is identical on every rank before the DDP wrap; records are written once; tokens_seen
 counts every rank; the LR schedule advances num_processes ticks per optimizer step (accelerate's prepared scheduler,
-so upstream's total_steps, computed from the unsharded loader, is in ticks); fixed-step and early-stop runs end
-together on all ranks; epoch mode runs every epoch with the cosine over all of them; a rerun is skipped.
+so upstream's total_steps, computed from the unsharded loader, is in ticks); fixed-step mode's cosine spans exactly
+its optimizer steps (min_lr at the last, no cycling); fixed-step and early-stop runs end together on all ranks; epoch
+mode runs every epoch with the cosine over all of them; a rerun is skipped.
 
     python tests/smoke_partial_distill_ddp_cpu.py      # from the repo root; launches itself with torchrun
 """
@@ -15,7 +16,7 @@ import sys
 import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-NPROC, BATCH, ACCUM, STEPS, WARMUP = 2, 2, 2, 3, 3
+NPROC, BATCH, ACCUM, STEPS, WARMUP = 2, 2, 2, 6, 3
 
 if "LOCAL_RANK" not in os.environ:
     work = tempfile.mkdtemp(prefix="undo_ddp_smoke_")
@@ -119,10 +120,19 @@ for arm, stop_mode in (("A", "fixed_steps"), ("D", "fixed_steps"), ("C", "early"
             assert len(steps) == STEPS, steps
             # Every row is a full max_length sequence (join_or_subsequence): count all ranks' tokens.
             assert train[-1]["train/tokens_seen"] == STEPS * ACCUM * BATCH * NPROC * SEQ, train[-1]
-            # total_steps = min(epoch steps, max_steps) = STEPS ticks; optimizer step k is tick k * NPROC.
-            expected = [upstream_lr(k * NPROC, STEPS) for k in steps]
+            # The cosine spans STEPS optimizer steps = STEPS * NPROC ticks; optimizer step k is tick k * NPROC.
+            expected = [upstream_lr(k * NPROC, STEPS * NPROC) for k in steps]
             assert all(math.isclose(r["train/lr"], e, rel_tol=1e-6) for r, e in zip(train, expected)), \
                 ([r["train/lr"] for r in train], expected)
+            # First (in warmup), middle and last optimizer step, by hand: WARMUP = 3 ticks, 12 ticks in all.
+            lrs = [r["train/lr"] for r in train]
+            mid = STEPS // 2   # step 3, tick 6: cosine progress (6 - 3) / (12 - 3) = 1/3
+            by_hand = {1: 9e-4 * 2 / 3,
+                       mid: 7e-4 + 2e-4 * 0.5 * (1 + math.cos(math.pi / 3)),
+                       STEPS: 7e-4}
+            for k, lr in by_hand.items():
+                assert math.isclose(lrs[k - 1], lr, rel_tol=1e-6), (k, lrs[k - 1], lr)
+            assert all(a >= b for a, b in zip(lrs[1:], lrs[2:])), f"LR rose after warmup: {lrs}"
         if stop_mode == "epoch":
             # Every epoch in full, no early stop, and the cosine over all of them: total_steps is the unsharded
             # loader's batches // ACCUM x EPOCHS ticks, as in early mode (not fixed mode's step cap).
