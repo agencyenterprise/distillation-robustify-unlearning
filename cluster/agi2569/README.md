@@ -146,6 +146,43 @@ arm's one-epoch cap with a margin: B (KL, English only) <=509 steps, C <=509, D 
 "Expected" assumes each arm stops where arm A did (1-800 steps, 2,551 in all), capped at its epoch. At the 16-GPU
 weekday cap that is ~11-13 h of wall clock with an empty queue.
 
+## Fixed-compute check
+
+Every run trains a fixed number of optimizer steps with no early stop, at equal compute: CE arms 403 steps (half
+of full distillation's 806), KL arms round(403 x 3/4) = 302 (a KL step also runs the teacher forward: 4 units per
+token against CE's 3, as `compute_ratio_flops` in `aggregate.py`). Warmup and cosine span exactly those steps.
+Arms A, B at alpha 0.6; C, D, E, F at alpha 0.0 and 0.6 (A and B at alpha 0 are the unlearned model). D and E use
+uniform Korean targets. One partial job per model and its 10 relearns after it, validating every 20 steps (Fig 7b
+reads step 40, the tables step 500).
+
+```bash
+mkdir -p /mnt/polished-lake/home/allegralaro/agi-2569/logs
+J=cluster/agi2569
+PD="--gpus=4 --cpus-per-task=80 --mem-per-gpu=96G --time=02:30:00"   # one partial-distill run per job
+RL="--gpus=1 --cpus-per-task=20 --mem-per-gpu=96G --time=00:40:00"   # one relearn run per task
+
+# 0. Datasets caches (loads only, if Wave 1's caches are intact)
+warm_pd=$(sbatch --parsable $J/warm_cache.sbatch run_partial_distill_language.py --arms A B C D E F)
+warm_rl=$(sbatch --parsable $J/warm_cache.sbatch run_relearn_language.py)
+
+# 1. run <arm> <alpha> <fixed steps>: the partial run, then its 10 relearns (task i = attacker LR i)
+run() {
+  pd=$(sbatch --parsable -d afterok:$warm_pd $PD --array=0 $J/partial_distill.sbatch        --arms $1 --alphas $2 --kor_targets uniform --stop_mode fixed_steps --fixed_steps $3)
+  sbatch -d afterok:$warm_rl:$pd $RL --array=0-9 $J/relearn.sbatch --groups partial        --arms $1 --alphas $2 --kor_targets uniform --stop_modes fixed_steps --fixed_steps $3 --eval_every 20
+}
+run A 0.6 302; run B 0.6 302
+for arm in C D E F; do for alpha in 0.0 0.6; do run $arm $alpha 403; done; done
+
+# 2. When done
+bash $J/sync_s3.sh
+```
+
+Runs: 10 partial distillations (`...-arm_{A,B}-alpha_0.6-beta_0.1-seed_111-fixed_steps_302`,
+`...-arm_{C,D_uniform,E_uniform,F}-alpha_{0.0,0.6}-beta_0.1-seed_111-fixed_steps_403`), then 100 relearns (records
+`<lr>_eval_every_20_only_forget_data.txt`). Time limits: 302 KL steps at ~17 s and 403 CE steps at ~13 s are both
+~1.5 h with evaluation (403 steps at 17 s, ~2 h); a relearn validating every 20 steps is ~15 min (12.6 at 25).
+About 60 partial GPU-h (10 x 4 GPUs x 1.5 h) and 25 relearn GPU-h.
+
 Wave 2: arm E (D from the base model), arm F (C from the base model), arm G (sanity: CE on English + Korean) at two alphas; arm D with unigram targets later.
 
 ## GPU geometry per stage
@@ -169,8 +206,9 @@ as upstream's did. `tests/smoke_partial_distill_ddp_cpu.py` checks this with 2 p
 - accelerate's prepared scheduler advances `num_processes` ticks per optimizer step, so `total_steps` and the 50
   warmup steps are counted in ticks. That makes 12.5 optimizer steps of warmup.
 - Early stop (`max_steps=-1`): the cosine spans the epoch, as intended.
-- Fixed 500 steps: the run stops after 500 optimizer steps, but the 500-tick cosine ends at step 125. After that
-  the LR cycles between `min_lr` (7e-4) and the peak (9e-4) with a period of 225 steps.
+- Fixed steps: upstream's 500-tick cosine ended at optimizer step 125 of 500 and then cycled between `min_lr`
+  (7e-4) and the peak (9e-4). This fork counts fixed mode's `total_steps` as `fixed_steps x num_processes` ticks,
+  so the cosine reaches `min_lr` at the last optimizer step on any process count; the warmup stays 50 ticks.
 - `--max_steps` in early mode therefore also shortens the schedule. Leave it unset: the epoch is the paper's cap.
 
 **Other DDP properties, all checked by the DDP smoke test:**
