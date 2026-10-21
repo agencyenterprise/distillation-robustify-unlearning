@@ -10,12 +10,13 @@ from utils.paths import CACHE_DIR, DATASET_DIR
 OUTPUT_DIR = DATASET_DIR + "/fineweb"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-def download_dataset(dataset_id, subset_name, output_filename, split="train", cache_dir=CACHE_DIR, batch_size=1_000_000, max_rows=None):
-    print(f"Downloading subset '{subset_name}' from '{dataset_id}'...")
+def download_dataset(dataset_id, subset_name, output_filename, split="train", cache_dir=CACHE_DIR, batch_size=1_000_000, max_rows=None,
+                     revision=None):
+    print(f"Downloading subset '{subset_name}' from '{dataset_id}' (revision {revision or 'default branch'})...")
     if subset_name is None:
-        ds = load_dataset(dataset_id, split=split, streaming=True, cache_dir=cache_dir)
+        ds = load_dataset(dataset_id, split=split, streaming=True, cache_dir=cache_dir, revision=revision)
     else:
-        ds = load_dataset(dataset_id, name=subset_name, split=split, streaming=True, cache_dir=cache_dir)
+        ds = load_dataset(dataset_id, name=subset_name, split=split, streaming=True, cache_dir=cache_dir, revision=revision)
     total = ds.num_rows if hasattr(ds, "num_rows") and ds.num_rows is not None else None
 
     output_path = os.path.join(OUTPUT_DIR, output_filename)
@@ -52,6 +53,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--settings', nargs='+', default=['wmdp', 'language', 'arithmetic'], choices=['wmdp', 'language', 'arithmetic'])
     parser.add_argument('--max_rows', type=int, default=10_000_000)
+    # Upstream pins no revision. The paper's data scripts date from 2025-05-30, when fineweb-2's default branch was
+    # v2.0.1; v2.1.0 (2025-06-26) re-filtered kor_Hang. AGI-2569 pins v2.0.1 for an exact reproduction.
+    parser.add_argument('--kor_revision', default=None, help='fineweb-2 revision for kor_Hang (default: the default branch)')
     args = parser.parse_args()
     max_rows = args.max_rows
 
@@ -130,7 +134,8 @@ if __name__ == "__main__":
             dataset_id="HuggingFaceFW/fineweb-2",
             subset_name="kor_Hang",
             output_filename="fineweb2_kor.jsonl",
-            max_rows=max_rows
+            max_rows=max_rows,
+            revision=args.kor_revision
         )
 
     # ====== REQUIRED FOR LANGUAGE, ARITHMETIC, AND WMDP SETTING ======
