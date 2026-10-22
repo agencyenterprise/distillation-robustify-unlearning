@@ -185,6 +185,64 @@ About 60 partial GPU-h (10 x 4 GPUs x 1.5 h) and 25 relearn GPU-h.
 
 Wave 2: arm E (D from the base model), arm F (C from the base model), arm G (sanity: CE on English + Korean) at two alphas; arm D with unigram targets later.
 
+## v2 Fig 5b chain
+
+Data v2 (Korean pinned to fineweb-2 v2.0.1) and its models: base and oracle pretrained by `pretrain_v2.sbatch`
+(packed, 1 GPU, full precision). Every job carries `--export=ALL,AGI2569_V=2`, so `env.sh` reads and writes only
+`$WORK/datasets_v2` and `$WORK/models_v2` (v1 is untouched; run and record names are v1's, under the v2 root). Partial
+distillation runs in full precision as upstream (`PRECISION=fp32`: `--mixed_precision no`; `MATMUL_PRECISION=highest`
+is PyTorch's default, no TF32; `high` would allow TF32). MaxEnt and relearning stay as they are (they load bf16
+weights, as upstream). Display letters: A = arm A, C = arm D (uniform Korean targets), E = arm E (uniform). Arm E's
+student is the base, but every arm loads the MaxEnt teacher (early stop compares English to it), so E also waits
+for unlearning.
+
+Everything is submitted on hold. Release it once the base checks out (4.94 / 3.47): `scontrol release $(cat $HELD)`.
+
+```bash
+mkdir -p /mnt/polished-lake/home/allegralaro/agi-2569/logs
+J=cluster/agi2569
+base=76534 oracle=76599                               # v2 pretraining: base (English + Korean), oracle (English only)
+HELD=/mnt/polished-lake/home/allegralaro/agi-2569/logs/v2_fig5b_jobs.txt; : > $HELD
+q() { sbatch --parsable --hold "$@" | tee -a $HELD; }   # submit on hold, record the id
+V2="--export=ALL,AGI2569_V=2"
+FP32="--export=ALL,AGI2569_V=2,PRECISION=fp32,MATMUL_PRECISION=highest"
+PD="--gpus=4 --cpus-per-task=80 --mem-per-gpu=96G"   # one partial-distill run per task
+RL="--gpus=1 --cpus-per-task=20 --mem-per-gpu=96G --time=00:45:00"   # one relearn run per task
+
+# 1. MaxEnt unlearning at lr 8e-5 only (the teacher), 1 GPU
+unlearn=$(q $V2 -d afterok:$base --gpus=1 --cpus-per-gpu=8 --mem-per-gpu=96G --time=02:00:00 $J/unlearn.sbatch --lrs 8e-5)
+
+# 2. Datasets caches (partial distillation packs with the teacher's tokenizer, relearning with the base's)
+warm_pd=$(q $FP32 -d afterok:$unlearn $J/warm_cache.sbatch run_partial_distill_language.py --arms A D E)
+warm_rl=$(q $V2 -d afterok:$base $J/warm_cache.sbatch run_relearn_language.py)
+
+# 3. Partial distillation, early stop, full precision, alpha 0.6 (task 0) and 0.8 (task 1)
+pd_a=$(q $FP32 $PD --time=14:00:00 -d afterok:$warm_pd --array=0-1 $J/partial_distill.sbatch --arms A --alphas 0.6 0.8 --stop_mode early)
+pd_d=$(q $FP32 $PD --time=12:00:00 -d afterok:$warm_pd --array=0-1 $J/partial_distill.sbatch --arms D --kor_targets uniform --alphas 0.6 0.8 --stop_mode early)
+pd_e=$(q $FP32 $PD --time=12:00:00 -d afterok:$warm_pd --array=0-1 $J/partial_distill.sbatch --arms E --kor_targets uniform --alphas 0.6 0.8 --stop_mode early)
+
+# 4. Relearning, 10 attacker LRs (task i = LR i), validation every 25 steps: each partial model after its own task,
+#    then the references (unlearn-only, data filtering, base)
+for ta in 0:0.6 1:0.8; do i=${ta%:*} a=${ta#*:}   # array task i of each partial job is alpha a
+  q $V2 $RL -d afterok:$warm_rl:${pd_a}_$i --array=0-9 $J/relearn.sbatch --groups partial --arms A --alphas $a --stop_modes early --eval_every 25
+  q $V2 $RL -d afterok:$warm_rl:${pd_d}_$i --array=0-9 $J/relearn.sbatch --groups partial --arms D --kor_targets uniform --alphas $a --stop_modes early --eval_every 25
+  q $V2 $RL -d afterok:$warm_rl:${pd_e}_$i --array=0-9 $J/relearn.sbatch --groups partial --arms E --kor_targets uniform --alphas $a --stop_modes early --eval_every 25
+done
+q $V2 $RL -d afterok:$warm_rl:$unlearn --array=0-9 $J/relearn.sbatch --groups refs --refs unlearn --eval_every 25
+q $V2 $RL -d afterok:$warm_rl:$oracle  --array=0-9 $J/relearn.sbatch --groups refs --refs filter  --eval_every 25
+q $V2 $RL -d afterok:$warm_rl          --array=0-9 $J/relearn.sbatch --groups refs --refs base    --eval_every 25
+
+# 5. After checking the base: release everything; when done, sync to s3://ae-gr/agi-2569/v2/
+scontrol release $(cat $HELD)
+AGI2569_V=2 bash $J/sync_s3.sh
+```
+
+Runs: 1 MaxEnt, 6 partial distillations (4 GPUs each), 90 relearns. Time limits assume strict fp32 is up to ~3x slower
+than bf16 (pretraining measured only TF32, 1.2x): each run is capped at one epoch (~808 steps), ~3.9 h in bf16 for arm
+A, less for the CE arms. Analysis reads v2 from its own copy: `aws s3 sync s3://ae-gr/agi-2569/v2/local_records <dir>`,
+then `aggregate.py <dir>` / `plot.py <dir>`. Precision is not in the run names, so a later bf16 v2 run with the same
+arguments would find the fp32 model and skip.
+
 ## GPU geometry per stage
 
 Conclusion: match upstream at every stage. Each stage below gives the evidence: the paper is arXiv 2506.06278v3,
@@ -253,7 +311,8 @@ cuts it ~3x and trimming the attacker LR grid (`--lrs`) proportionally.
 
 ## Choices to know about
 
-- **Mixed precision.** bf16 autocast everywhere (`ACCELERATE_MIXED_PRECISION=bf16`). Unlearning and relearning
+- **Mixed precision.** bf16 autocast everywhere (`ACCELERATE_MIXED_PRECISION=bf16`) unless a job sets
+  `PRECISION=fp32` (distillation and partial distillation, as upstream; see the v2 chain). Unlearning and relearning
   already load bf16 weights, as upstream.
 - **Pretraining packs** documents into 2048-token sequences (`join_or_subsequence=True`), like every later
   stage. Upstream's pretraining call did not run (it passed an unknown `truncate=False`).
