@@ -232,9 +232,10 @@ q $V2 $RL -d afterok:$warm_rl:$unlearn --array=0-9 $J/relearn.sbatch --groups re
 q $V2 $RL -d afterok:$warm_rl:$oracle  --array=0-9 $J/relearn.sbatch --groups refs --refs filter  --eval_every 25
 q $V2 $RL -d afterok:$warm_rl          --array=0-9 $J/relearn.sbatch --groups refs --refs base    --eval_every 25
 
-# 5. After checking the base: release everything; when done, sync to s3://ae-gr/agi-2569/v2/
-scontrol release $(cat $HELD)
-AGI2569_V=2 bash $J/sync_s3.sh
+wc -l $HELD   # 15 held jobs (arrays count once)
+
+# 5. Later, NOT with the block above. Once the base checks out: scontrol release $(cat $HELD)
+#    When done: AGI2569_V=2 bash $J/sync_s3.sh   (to s3://ae-gr/agi-2569/v2/)
 ```
 
 Runs: 1 MaxEnt, 6 partial distillations (4 GPUs each), 90 relearns. Time limits assume strict fp32 is up to ~3x slower
