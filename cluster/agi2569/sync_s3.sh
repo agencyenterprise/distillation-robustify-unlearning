@@ -11,8 +11,11 @@
 #             logs/, kor_unigram_counts.pt, and the fork commit
 #   --models: also the four reference models (base, oracle, MaxEnt teacher, full distill; ~0.5 GB each), for the
 #             default teacher LR (src/utils/run_names.py) or the one given: sync_s3.sh --models 3e-5
+#   AGI2569_V=2 bash cluster/agi2569/sync_s3.sh syncs the v2 models and records to s3://ae-gr/agi-2569/v2/ instead
+#             (same relative paths as v1, so they must not share a prefix).
 ONLINE=1 source cluster/agi2569/env.sh
 DEST=s3://ae-gr/agi-2569
+[ "$AGI2569_V" = 1 ] || DEST=$DEST/v$AGI2569_V
 aws sts get-caller-identity > /dev/null && echo "S3 credentials valid" || { echo "S3 credentials INVALID"; exit 1; }
 
 aws s3 sync "$MODEL_DIR/local_records" "$DEST/local_records" --only-show-errors
