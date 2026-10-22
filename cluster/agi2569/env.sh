@@ -13,6 +13,15 @@ case $AGI2569_V in
        mkdir -p "$MODEL_DIR"
        [ -e "$MODEL_DIR/random_init_models" ] || ln -s "$WORK/models/random_init_models" "$MODEL_DIR/random_init_models" \
            2>/dev/null || [ -e "$MODEL_DIR/random_init_models" ] ;;
+    3) # v3: data v2 with the base and oracle pretrained at the distillation geometry (4 GPUs x 4 x 60 = 960 sequences,
+       # ~808 steps; paper App. B.2). models_v3 links them under the standard names, so every later stage finds them.
+       export DATASET_DIR=$WORK/datasets_v2 MODEL_DIR=$WORK/models_v3
+       mkdir -p "$MODEL_DIR/pretrained_models"
+       for l in "random_init_models:$WORK/models/random_init_models" \
+                "pretrained_models/gemma-2-0.1B_eng+kor:$WORK/models_v2/pretrained_models/gemma-2-0.1B_eng+kor_g4x4x60" \
+                "pretrained_models/gemma-2-0.1B_eng:$WORK/models_v2/pretrained_models/gemma-2-0.1B_eng_g4x4x60"; do
+           [ -e "$MODEL_DIR/${l%%:*}" ] || ln -s "${l#*:}" "$MODEL_DIR/${l%%:*}" 2>/dev/null || [ -e "$MODEL_DIR/${l%%:*}" ]
+       done ;;
     *) echo "[env] unknown AGI2569_V=$AGI2569_V" >&2; exit 1 ;;
 esac
 export NUM_PROC=24                    # dataset workers; 24 CPUs come with each GPU. Keep it fixed:
