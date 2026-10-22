@@ -105,7 +105,7 @@ def launch_in_parallel_accelerate_groups(cli_args_list, script, gpus_per_run, po
     """
     Generalises launch_in_parallel_one_per_four_gpus: each run is
     `accelerate launch --multi_gpu --num_processes gpus_per_run <script> <args>` on its own group of GPUs,
-    queued until all runs are done. Returns the number of failed runs.
+    queued until all runs are done. Mixed precision: ACCELERATE_MIXED_PRECISION (bf16 if unset; "no" for fp32). Returns the number of failed runs.
     """
     groups = gpu_groups(gpus_per_run)
     queue = list(cli_args_list)
@@ -122,7 +122,8 @@ def launch_in_parallel_accelerate_groups(cli_args_list, script, gpus_per_run, po
                 args = queue.pop(0)
                 multi = ["--multi_gpu"] if gpus_per_run > 1 else []
                 cmd = [sys.executable, "-m", "accelerate.commands.launch", *multi, "--num_processes", str(gpus_per_run),
-                       "--mixed_precision", "bf16", "--main_process_port", str(port_base + g), script, *args]
+                       "--mixed_precision", os.environ.get("ACCELERATE_MIXED_PRECISION", "bf16"),
+                       "--main_process_port", str(port_base + g), script, *args]
                 env = {**os.environ, "CUDA_VISIBLE_DEVICES": ",".join(group)}
                 print(f"Starting on GPUs {group}: {args}", flush=True)
                 running[g] = (subprocess.Popen(cmd, env=env), args)

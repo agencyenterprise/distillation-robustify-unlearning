@@ -15,6 +15,12 @@ from torch.utils.data import DataLoader
 import argparse
 import os
 
+# MATMUL_PRECISION (env): torch.set_float32_matmul_precision for fp32 runs. Unset keeps PyTorch's "highest" (no TF32),
+# which is what upstream's distillation ran without mixed precision; "high" allows TF32. Only fp32 matmuls are affected.
+if os.environ.get("MATMUL_PRECISION"):
+    import torch
+    torch.set_float32_matmul_precision(os.environ["MATMUL_PRECISION"])
+
 # Set which model/unlearning method combinations to run
 #SETUPS_TO_RUN = ["gemma-2-0.1B_GradDiff", "gemma-2-0.1B_MaxEnt", "gemma-2-0.1B_RMU"]
 SETUPS_TO_RUN = ["gemma-2-0.1B_MaxEnt"]#, "gemma-2-0.1B_RMU"]

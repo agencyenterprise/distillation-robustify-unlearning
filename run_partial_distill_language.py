@@ -44,6 +44,12 @@ import sys
 import time
 from datetime import datetime
 
+# MATMUL_PRECISION (env): torch.set_float32_matmul_precision for fp32 runs. Unset keeps PyTorch's "highest" (no TF32),
+# which is what upstream's distillation ran without mixed precision; "high" allows TF32. Only fp32 matmuls are affected.
+if os.environ.get("MATMUL_PRECISION"):
+    import torch
+    torch.set_float32_matmul_precision(os.environ["MATMUL_PRECISION"])
+
 # Configuration constants
 SETUPS_TO_RUN = ["gemma-2-0.1B_MaxEnt"]
 OVERWRITE_OK = True

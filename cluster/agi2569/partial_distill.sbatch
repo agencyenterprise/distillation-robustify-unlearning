@@ -10,7 +10,7 @@
 # A sweep of partial-distillation runs, each on 4 GPUs as in the paper (2 runs at a time on a full node).
 # Array tasks split the sweep (task i runs every n-th run). Arguments go to run_partial_distill_language.py, e.g.
 #   sbatch --array=0-1 cluster/agi2569/partial_distill.sbatch --arms A --alphas 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8
-# The MaxEnt teacher is lr 8e-5 unless --teacher_lr says otherwise.
+# The MaxEnt teacher is lr 8e-5 unless --teacher_lr says otherwise. bf16 autocast unless PRECISION=fp32 (env.sh).
 source cluster/agi2569/env.sh
 $PY run_partial_distill_language.py --run_all --gpus_per_run 4 \
     --shard "${SLURM_ARRAY_TASK_ID:-0}" --num_shards "${SLURM_ARRAY_TASK_COUNT:-1}" "$@"
