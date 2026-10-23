@@ -20,7 +20,7 @@ case $AGI2569_V in
        for l in "random_init_models:$WORK/models/random_init_models" \
                 "pretrained_models/gemma-2-0.1B_eng+kor:$WORK/models_v2/pretrained_models/gemma-2-0.1B_eng+kor_g4x4x60" \
                 "pretrained_models/gemma-2-0.1B_eng:$WORK/models_v2/pretrained_models/gemma-2-0.1B_eng_g4x4x60"; do
-           [ -e "$MODEL_DIR/${l%%:*}" ] || ln -s "${l#*:}" "$MODEL_DIR/${l%%:*}" 2>/dev/null || [ -e "$MODEL_DIR/${l%%:*}" ]
+           [ -e "$MODEL_DIR/${l%%:*}" ] || [ -L "$MODEL_DIR/${l%%:*}" ] || ln -s "${l#*:}" "$MODEL_DIR/${l%%:*}" 2>/dev/null || [ -e "$MODEL_DIR/${l%%:*}" ]
        done ;;
     4) # v4: as v3, with the base and oracle pretrained at 2 GPUs x 5 x 80 (800 sequences, ~969 steps), the closest base
        # to the paper's so far (4.81 / 3.51). models_v4 links them under the standard names.
@@ -29,7 +29,7 @@ case $AGI2569_V in
        for l in "random_init_models:$WORK/models/random_init_models" \
                 "pretrained_models/gemma-2-0.1B_eng+kor:$WORK/models_v2/pretrained_models/gemma-2-0.1B_eng+kor_g2x5x80" \
                 "pretrained_models/gemma-2-0.1B_eng:$WORK/models_v2/pretrained_models/gemma-2-0.1B_eng_g2x5x80"; do
-           [ -e "$MODEL_DIR/${l%%:*}" ] || ln -s "${l#*:}" "$MODEL_DIR/${l%%:*}" 2>/dev/null || [ -e "$MODEL_DIR/${l%%:*}" ]
+           [ -e "$MODEL_DIR/${l%%:*}" ] || [ -L "$MODEL_DIR/${l%%:*}" ] || ln -s "${l#*:}" "$MODEL_DIR/${l%%:*}" 2>/dev/null || [ -e "$MODEL_DIR/${l%%:*}" ]
        done ;;
     *) echo "[env] unknown AGI2569_V=$AGI2569_V" >&2; exit 1 ;;
 esac
