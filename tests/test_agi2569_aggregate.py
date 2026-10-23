@@ -207,3 +207,18 @@ def test_fixed_compute_names(records):
     curves = aggregate.load_relearn_curves(records)
     fixed = curves[curves.stop.isin(["fixed_steps_302", "fixed_steps_403"])]
     assert set(fixed.eval_every) == {20} and fixed.step.max() == 500 and 40 in set(fixed.step)
+
+
+def test_stop_rule_names(records):
+    """--stop_rule any_shard: its own name suffix, parsed into its own stop series; pooled names are unchanged."""
+    pooled = partial_distill_name("A", 0.7, 0.1, 111, "early")
+    shard = partial_distill_name("A", 0.7, 0.1, 111, "early", stop_rule="any_shard")
+    assert shard == pooled + "-stop_any_shard"
+    assert partial_distill_name("A", 0.7, 0.1, 111, "early", stop_rule="pooled") == pooled
+    with pytest.raises(ValueError):
+        partial_distill_name("A", 0.7, 0.1, 111, "fixed_steps", stop_rule="any_shard")
+    assert aggregate.describe_model(relearn_record_dir(pooled))["stop"] == "early_stop"
+    meta = aggregate.describe_model(relearn_record_dir(shard))
+    assert (meta["arm"], meta["alpha"], meta["stop"]) == ("A", 0.7, "early_stop-stop_any_shard")
+    epochs2 = partial_distill_name("A", 0.7, 0.1, 111, "early", epochs=2, stop_rule="any_shard")
+    assert aggregate.describe_model(relearn_record_dir(epochs2))["stop"] == "early_stop_epochs_2-stop_any_shard"

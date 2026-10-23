@@ -53,7 +53,8 @@ DEFINITIONS = ("min_any_step", "min_final")
 KL_ARMS = ("A", "B")
 PARTIAL_RE = re.compile(
     r"partial_distill-teacher_lr_(?P<teacher_lr>[\d.e+-]+)-arm_(?P<arm>[A-G](?:_uniform|_unigram)?)"
-    r"-alpha_(?P<alpha>[\d.]+)-beta_(?P<beta>[\d.]+)-seed_(?P<seed>\d+)-(?P<stop>fixed_steps_\d+|early_stop_epochs_\d+|early_stop|epochs_\d+)$"
+    r"-alpha_(?P<alpha>[\d.]+)-beta_(?P<beta>[\d.]+)-seed_(?P<seed>\d+)-(?P<stop>fixed_steps_\d+|early_stop_epochs_\d+|early_stop|epochs_\d+)"
+    r"(?P<stop_rule>-stop_any_shard)?$"   # --stop_rule any_shard runs (pooled runs have no suffix)
 )
 RECORD_RE = re.compile(r"^(?P<lr>[^_]+)(?:_eval_every_(?P<eval_every>\d+))?_only_forget_data\.txt$")
 ATTACK_LRS = (1e-3, 7e-4, 4e-4, 1e-4, 7e-5, 5e-5, 1e-5, 7e-6, 4e-6, 1e-6)  # run_relearn_language.py LRS_TO_RUN
@@ -76,7 +77,9 @@ def describe_model(record_dir, teacher_lr=TEACHER_LR):
     if match is None or match["teacher_lr"] != lr_tag(teacher_lr):
         return None
     return {"model": record_dir, "role": "partial", "arm": match["arm"], "alpha": float(match["alpha"]),
-            "beta": float(match["beta"]), "seed": int(match["seed"]), "stop": match["stop"]}
+            "beta": float(match["beta"]), "seed": int(match["seed"]),
+            # any_shard runs keep the suffix in `stop` ('early_stop-stop_any_shard'), a series of their own
+            "stop": match["stop"] + (match["stop_rule"] or "")}
 
 
 def load_relearn_curves(records_root, teacher_lr=TEACHER_LR):

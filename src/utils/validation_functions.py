@@ -96,8 +96,9 @@ def evaluate_kd_ce_ppl(student_model, teacher_model, data_loader, pad_token_id, 
 
     return (avg_kd, avg_ce, avg_ppl)
 
-def evaluate_ce_loss(model, data_loader, pad_token_id, accelerator, fn_only=False):
-    """Compute average cross-entropy loss over the provided data_loader."""
+def evaluate_ce_loss(model, data_loader, pad_token_id, accelerator, fn_only=False, return_shard=False):
+    """Compute average cross-entropy loss over the provided data_loader.
+    return_shard: also return this rank's own shard mean, upstream's value (upstream returned it without pooling)."""
     model.eval()
     total_ce_loss = 0.0
     total_count = 0
@@ -117,13 +118,15 @@ def evaluate_ce_loss(model, data_loader, pad_token_id, accelerator, fn_only=Fals
         total_ce_loss += ce_loss.item() * batch_size_local
         total_count += batch_size_local
 
+    shard_mean = total_ce_loss / max(total_count, 1)
     # Each rank sees its own shard of the (prepared) loader: sum over ranks so all ranks
     # log and early-stop on the same full-validation-set number. A no-op on one process.
     totals = torch.tensor([total_ce_loss, total_count], dtype=torch.float32, device=accelerator.device)
     total_ce_loss, total_count = accelerator.reduce(totals, reduction="sum").tolist()
 
     model.train()
-    return total_ce_loss / max(total_count, 1)
+    pooled_mean = total_ce_loss / max(total_count, 1)
+    return (pooled_mean, shard_mean) if return_shard else pooled_mean
 
 
 def get_arithmetic_eval_fn(
@@ -236,11 +239,14 @@ def get_korean_and_english_evalaution_fn(
     dataset_cache_dir, 
     cache_dir,
     batch_size,
-    accelerator
+    accelerator,
+    per_shard=False,
 ):
     """
     Returns an evaluation function that takes the model and calculates the cross entropy loss over the provided eng_valid_file and kor_valid_file.
     Ensure the same accelerator is passed into this function and the training which it is being used in 
+    per_shard: also record every rank's own shard mean (upstream's unpooled value) as val/{eng,kor}_ce_loss_shard{i},
+    i = process index, for --stop_rule any_shard. Every rank gets every shard's value.
     """
     eng_valid_ds = load_dataset("json", data_files=eng_valid_file, split="train", cache_dir=dataset_cache_dir)
     kor_valid_ds = load_dataset("json", data_files=kor_valid_file, split="train", cache_dir=dataset_cache_dir)
@@ -270,12 +276,28 @@ def get_korean_and_english_evalaution_fn(
     )
 
     def eval_fn(model, print_results):
-        eng_valid_ce_loss = evaluate_ce_loss(model, eng_valid_loader, tokenizer.pad_token_id, accelerator, fn_only=True)
-        kor_valid_ce_loss = evaluate_ce_loss(model, kor_valid_loader, tokenizer.pad_token_id, accelerator, fn_only=True)
-        val_dict = {
-            "val/eng_ce_loss": eng_valid_ce_loss,
-            "val/kor_ce_loss": kor_valid_ce_loss,
-        }
+        if not per_shard:
+            eng_valid_ce_loss = evaluate_ce_loss(model, eng_valid_loader, tokenizer.pad_token_id, accelerator, fn_only=True)
+            kor_valid_ce_loss = evaluate_ce_loss(model, kor_valid_loader, tokenizer.pad_token_id, accelerator, fn_only=True)
+            val_dict = {
+                "val/eng_ce_loss": eng_valid_ce_loss,
+                "val/kor_ce_loss": kor_valid_ce_loss,
+            }
+        else:
+            eng_valid_ce_loss, eng_shard = evaluate_ce_loss(model, eng_valid_loader, tokenizer.pad_token_id, accelerator,
+                                                            fn_only=True, return_shard=True)
+            kor_valid_ce_loss, kor_shard = evaluate_ce_loss(model, kor_valid_loader, tokenizer.pad_token_id, accelerator,
+                                                            fn_only=True, return_shard=True)
+            val_dict = {
+                "val/eng_ce_loss": eng_valid_ce_loss,
+                "val/kor_ce_loss": kor_valid_ce_loss,
+            }
+            # float64, so each rank's own value comes back bit-identical to its Python float
+            shards = accelerator.gather(torch.tensor([[eng_shard, kor_shard]], dtype=torch.float64,
+                                                     device=accelerator.device)).tolist()
+            for i, (eng_i, kor_i) in enumerate(shards):
+                val_dict[f"val/eng_ce_loss_shard{i}"] = eng_i
+                val_dict[f"val/kor_ce_loss_shard{i}"] = kor_i
         if print_results:
             print_acc(f"[validation_functions.py] Validation Results:", print_message)
             for key, value in val_dict.items():

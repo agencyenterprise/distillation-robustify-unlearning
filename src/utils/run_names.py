@@ -46,6 +46,9 @@ ARMS = ['A', 'B', 'C', 'D', 'E', 'F', 'G']
 RANDOM_TARGET_ARMS = ['D', 'E']   # these take --kor_targets
 KOR_TARGETS = ['uniform', 'unigram']
 STOP_MODES = ['fixed_steps', 'early', 'epoch']
+# Early-stop rule: 'pooled' (ours: English loss over the whole validation set) or 'any_shard' (upstream: stop when any
+# rank's own validation shard is within the threshold). Only 'any_shard' adds to the name, so pooled names are unchanged.
+STOP_RULES = ['pooled', 'any_shard']
 
 SWEEP_ALPHAS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
 SWEEP_BETAS = [0.1]
@@ -69,16 +72,25 @@ def stop_label(stop_mode, fixed_steps=FIXED_STEPS, epochs=EPOCHS):
     return 'early_stop' if epochs == 1 else f"early_stop_epochs_{epochs}"
 
 
+def stop_rule_suffix(stop_rule='pooled'):
+    if stop_rule not in STOP_RULES:
+        raise ValueError(f"unknown stop_rule {stop_rule!r}")
+    return "" if stop_rule == 'pooled' else f"-stop_{stop_rule}"
+
+
 def fmt(x):
     """0.1 -> '0.1', 0.30000000000000004 -> '0.3', 0.0 -> '0.0' (matches upstream's str(float))."""
     return str(round(float(x), 6))
 
 
 def partial_distill_name(arm, alpha, beta, seed, stop_mode='fixed_steps', fixed_steps=FIXED_STEPS, kor_targets='uniform',
-                         teacher_lr=TEACHER_LR, epochs=EPOCHS):
+                         teacher_lr=TEACHER_LR, epochs=EPOCHS, stop_rule='pooled'):
+    if stop_rule != 'pooled' and stop_mode != 'early':
+        raise ValueError(f"stop_rule {stop_rule!r} applies only to stop_mode 'early'")
     return (f"partial_distill_models/gemma-2-0.1B-language-partial_distill-teacher_lr_{lr_tag(teacher_lr)}"
             f"-arm_{arm_label(arm, kor_targets)}"
-            f"-alpha_{fmt(alpha)}-beta_{fmt(beta)}-seed_{seed}-{stop_label(stop_mode, fixed_steps, epochs)}")
+            f"-alpha_{fmt(alpha)}-beta_{fmt(beta)}-seed_{seed}-{stop_label(stop_mode, fixed_steps, epochs)}"
+            f"{stop_rule_suffix(stop_rule)}")
 
 
 def relearn_record_dir(model):

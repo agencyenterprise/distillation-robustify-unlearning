@@ -18,6 +18,9 @@ model names, crossing epochs if needed; warmup + cosine to min_lr over exactly t
 --stop_mode early (upstream: stop once English validation loss is within 5% of the teacher's; at most one epoch), or
 --stop_mode epoch (train --epochs full passes, default 1, with no early stop; the cosine spans them, as early mode's
 spans its epoch). Epoch mode is for runs that early stop would end at once, e.g. arm C at alpha 0.
+--stop_rule (early mode): 'pooled' (default) tests English loss over the whole validation set; 'any_shard' is upstream's
+rule, stopping when any rank's own validation shard is within 5% of the teacher on that shard. any_shard runs get a
+'-stop_any_shard' name suffix and log every shard's loss at each check.
 
 GPUs: the paper ran every language UNDO run on 4 H200s (arXiv 2506.06278, App. E): per-process batch 4 x 60
 accumulation, so 960 sequences per optimizer step. --gpus_per_run 4 reproduces this; the step and schedule
@@ -30,7 +33,7 @@ Launch Command (Sweep):      python run_partial_distill_language.py --run_all --
 from src.tools.partial_distill_langarith import load_tokenizer, load_train_dataset, partial_distill
 from src.utils.paths import CACHE_DIR, DATASET_DIR, MODEL_DIR, USE_WANDB, WANDB_API_KEY
 from src.utils.run_names import (
-    ARMS, EPOCHS, KOR_TARGETS, STOP_MODES, SWEEP_ALPHAS, SWEEP_BETAS, SWEEP_SEEDS, FIXED_STEPS, TEACHER_LR,
+    ARMS, EPOCHS, KOR_TARGETS, STOP_MODES, STOP_RULES, SWEEP_ALPHAS, SWEEP_BETAS, SWEEP_SEEDS, FIXED_STEPS, TEACHER_LR,
     partial_distill_name, reference_models,
 )
 from accelerate import Accelerator
@@ -146,12 +149,33 @@ def korean_english_stop_cond_fn(student_eval_dict, teacher_eval_dict, stop_condi
         # Stop if the student is within threshold of the teacher on both languages
         return eng_diff < retain_threshold and kor_diff < forget_threshold
 
+def any_shard_stop_cond_fn(accelerator):
+    """Upstream's rule: each rank tests its own validation shard (student and teacher on the same shard) with
+    korean_english_stop_cond_fn; partial_distill then stops if any rank says stop (its gather + sum > 0, as upstream).
+    Needs eval_fn built with per_shard=True. Rank 0 logs every shard's English loss and verdict."""
+    rank, n = accelerator.process_index, accelerator.num_processes
+
+    def shard_view(d, i):
+        return {"val/eng_ce_loss": d[f"val/eng_ce_loss_shard{i}"], "val/kor_ce_loss": d[f"val/kor_ce_loss_shard{i}"]}
+
+    def stop_cond(student_eval_dict, teacher_eval_dict):
+        verdicts = [korean_english_stop_cond_fn(shard_view(student_eval_dict, i), shard_view(teacher_eval_dict, i))
+                    for i in range(n)]
+        shards = ", ".join(
+            f"shard{i} {student_eval_dict[f'val/eng_ce_loss_shard{i}']:.6f}/{teacher_eval_dict[f'val/eng_ce_loss_shard{i}']:.6f}"
+            f"{' STOP' if v else ''}" for i, v in enumerate(verdicts))
+        print_acc(f"[stop_rule any_shard] step {student_eval_dict.get('train/step')}: English student/teacher "
+                  f"pooled {student_eval_dict['val/eng_ce_loss']:.6f}/{teacher_eval_dict['val/eng_ce_loss']:.6f}; "
+                  f"{shards}", accelerator.is_main_process)
+        return verdicts[rank]
+    return stop_cond
+
 def never_stop_cond_fn(student_eval_dict, teacher_eval_dict):
     """fixed_steps mode: train for exactly max_steps. epoch mode: for exactly the epochs."""
     return False
 
 def run_experiment(setup_id, alpha, beta, seed=None, arm='A', kor_targets='uniform', stop_mode='fixed_steps',
-                   fixed_steps=FIXED_STEPS, max_steps=None, teacher_lr=TEACHER_LR, epochs=EPOCHS):
+                   fixed_steps=FIXED_STEPS, max_steps=None, teacher_lr=TEACHER_LR, epochs=EPOCHS, stop_rule='pooled'):
     """Run a single experiment. max_steps caps early-stop runs (default: none, as upstream)."""
     current_setup = setups[setup_id].copy()
     arm_config = ARM_CONFIGS[arm]
@@ -161,7 +185,7 @@ def run_experiment(setup_id, alpha, beta, seed=None, arm='A', kor_targets='unifo
         current_setup['seed'] = seed
 
     model_name = partial_distill_name(arm, alpha, beta, current_setup['seed'], stop_mode, fixed_steps, kor_targets,
-                                      teacher_lr, epochs)
+                                      teacher_lr, epochs, stop_rule)
     current_setup['output_dir'] = current_setup['output_dir'].replace('model_name', model_name)
     current_setup['path_local_record'] = current_setup['path_local_record'].replace('model_name', model_name)
     current_setup['teacher_model_name'] = model_path('unlearn', teacher_lr)
@@ -207,8 +231,16 @@ def run_experiment(setup_id, alpha, beta, seed=None, arm='A', kor_targets='unifo
             dataset_cache_dir=current_setup['dataset_cache_dir'],
             cache_dir=current_setup['cache_dir'],
             batch_size=current_setup['batch_size'],
-            accelerator=accelerator
+            accelerator=accelerator,
+            per_shard=(stop_rule == 'any_shard'),
         )
+
+    if stop_mode != 'early':
+        stop_cond_fn = never_stop_cond_fn
+    elif stop_rule == 'any_shard':
+        stop_cond_fn = any_shard_stop_cond_fn(accelerator)
+    else:
+        stop_cond_fn = korean_english_stop_cond_fn
 
     domains = arm_config['domains']
     partial_distill(
@@ -219,7 +251,7 @@ def run_experiment(setup_id, alpha, beta, seed=None, arm='A', kor_targets='unifo
         stopping_strategy='first_exhausted',  # Add missing parameter
         join_or_subsequence=True,
         eval_fn=eval_fn,
-        stop_cond_fn=korean_english_stop_cond_fn if stop_mode == 'early' else never_stop_cond_fn,
+        stop_cond_fn=stop_cond_fn,
         accelerator=accelerator,
         output_dir=current_setup['output_dir'],
         cache_dir=current_setup['cache_dir'],
@@ -282,10 +314,10 @@ def warm_cache(args):
     print(f"[warm_cache] {len(arrow_files() - before)} new cache files in {CACHE_DIR} (0: every cache existed)")
 
 def experiment_cli_args(experiment):
-    setup_id, alpha, beta, seed, arm, kor_targets, stop_mode, fixed_steps, max_steps, teacher_lr, epochs = experiment
+    setup_id, alpha, beta, seed, arm, kor_targets, stop_mode, fixed_steps, max_steps, teacher_lr, epochs, stop_rule = experiment
     cmd = ["--setup", setup_id, "--alpha", str(alpha), "--beta", str(beta), "--seed", str(seed), "--arm", arm,
            "--kor_targets", kor_targets, "--stop_mode", stop_mode, "--fixed_steps", str(fixed_steps),
-           "--teacher_lr", str(teacher_lr), "--epochs", str(epochs)]
+           "--teacher_lr", str(teacher_lr), "--epochs", str(epochs), "--stop_rule", stop_rule]
     if max_steps is not None:
         cmd.extend(["--max_steps", str(max_steps)])
     return cmd
@@ -320,7 +352,7 @@ def run_all_experiments(args):
     """Run all experiments in the sweep, optionally starting from a specific alpha"""
     alphas = [a for a in args.alphas if args.start_alpha is None or a >= args.start_alpha]
     experiments = [(setup_id, alpha, beta, seed, arm, args.kor_targets, args.stop_mode, args.fixed_steps, args.max_steps,
-                    args.teacher_lr, args.epochs)
+                    args.teacher_lr, args.epochs, args.stop_rule)
                    for setup_id in SETUPS_TO_RUN
                    for arm in args.arms
                    for alpha in alphas
@@ -375,6 +407,9 @@ if __name__ == "__main__":
     parser.add_argument('--kor_targets', choices=KOR_TARGETS, default='uniform', help='Arms D/E: random Korean targets')
     parser.add_argument('--stop_mode', choices=STOP_MODES, default='fixed_steps')
     parser.add_argument('--fixed_steps', type=int, default=FIXED_STEPS)
+    parser.add_argument('--stop_rule', choices=STOP_RULES, default='pooled',
+                        help="early mode: 'pooled' (default; whole validation set) or 'any_shard' (upstream: any "
+                             "rank's own shard within 5%%); any_shard adds '-stop_any_shard' to the run name")
     parser.add_argument('--max_steps', type=int, default=None,
                         help='early mode only: cap on optimizer steps. Like upstream max_steps it also shortens the '
                              'cosine schedule, so leave it unset to match the paper (an epoch is the cap there)')
@@ -404,7 +439,7 @@ if __name__ == "__main__":
     if args.alpha is not None and args.beta is not None:
         print(f"Running single experiment: arm {args.arm}, alpha {args.alpha}, beta {args.beta}, seed {args.seed}, {args.stop_mode}")
         run_experiment(args.setup, args.alpha, args.beta, args.seed, args.arm, args.kor_targets,
-                       args.stop_mode, args.fixed_steps, args.max_steps, args.teacher_lr, args.epochs)
+                       args.stop_mode, args.fixed_steps, args.max_steps, args.teacher_lr, args.epochs, args.stop_rule)
 
     # If run_all flag is set, run all experiments
     elif args.run_all or args.start_alpha is not None:
