@@ -22,6 +22,30 @@ from utils.loss_functions import (
 from utils.validation_functions import evaluate_kd_ce_ppl
 from utils.process_datasets import make_sequence_length
 
+def lr_lambda(scheduler_type, num_warmup_steps, total_steps, learning_rate, min_lr):
+    """partial_distill's LR multiplier at a scheduler tick: linear warmup over num_warmup_steps ticks, then linear or
+    cosine decay to min_lr at total_steps ticks."""
+    if scheduler_type == "linear":
+        def linear_lr_lambda(current_step):
+            if current_step < num_warmup_steps:
+                return float(current_step) / float(max(1, num_warmup_steps))
+            else:
+                progress = float(current_step - num_warmup_steps) / float(max(1, total_steps - num_warmup_steps))
+                return (1.0 - progress) * (1.0 - (min_lr / learning_rate)) + (min_lr / learning_rate)
+        return linear_lr_lambda
+
+    elif scheduler_type == "cosine":
+        def cosine_lr_lambda(current_step):
+            if current_step < num_warmup_steps:
+                return float(current_step) / float(max(1, num_warmup_steps))
+            else:
+                progress = float(current_step - num_warmup_steps) / float(max(1, total_steps - num_warmup_steps))
+                cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+                return cosine_decay * (1.0 - (min_lr / learning_rate)) + (min_lr / learning_rate)
+        return cosine_lr_lambda
+    raise ValueError(f"Unknown scheduler_type: {scheduler_type}")
+
+
 def partial_distill(
     teacher_model_name,
     student_model_name,
@@ -71,6 +95,7 @@ def partial_distill(
     random_target_domain=None,
     random_target_counts_path=None,
     schedule_over_max_steps=False,
+    warmup_optimizer_steps=None,
 ):
     """
     Distillation script using Accelerate. Replaces standard CE with forward KL (KL(teacher||student)).
@@ -93,6 +118,9 @@ def partial_distill(
                                 True (fixed-steps mode): the cosine spans exactly max_steps optimizer steps on
                                 any process count and reaches min_lr at the last one; the warmup stays
                                 num_warmup_steps ticks (12.5 optimizer steps on 4 processes, as in early mode).
+      warmup_optimizer_steps    None (default): warm up over num_warmup_steps ticks. An int (needs
+                                schedule_over_max_steps): warm up over this many optimizer steps instead
+                                (num_processes ticks each), then cosine to min_lr over the remaining steps.
     """
     assert loss_type in ("kl", "ce"), loss_type
     assert random_target_domain is None or loss_type == "ce", "random targets need loss_type='ce'"
@@ -193,6 +221,12 @@ def partial_distill(
     if schedule_over_max_steps:
         assert max_steps > 0, "schedule_over_max_steps needs max_steps"
         total_steps = max_steps * accelerator.num_processes  # in ticks: num_processes per optimizer step
+    if warmup_optimizer_steps is not None:
+        assert schedule_over_max_steps, "warmup_optimizer_steps needs schedule_over_max_steps"
+        assert 1 <= warmup_optimizer_steps < max_steps, (warmup_optimizer_steps, max_steps)
+        num_warmup_steps = warmup_optimizer_steps * accelerator.num_processes  # in ticks, as total_steps
+        print_acc(f"[serum_original.py] warmup: {warmup_optimizer_steps} optimizer steps = {num_warmup_steps} ticks",
+                  print_message)
     print_acc(f"[serum_original.py] {steps_per_epoch} steps/epoch, total steps: {total_steps}", print_message)
 
 
@@ -203,26 +237,8 @@ def partial_distill(
     print_acc(f"[serum_original.py] Using AdamW, LR={learning_rate}, weight_decay={weight_decay}", print_message)
     optimizer = torch.optim.AdamW(student_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
-    if scheduler_type == "linear":
-        def lr_lambda(current_step):
-            if current_step < num_warmup_steps:
-                return float(current_step) / float(max(1, num_warmup_steps))
-            else:
-                progress = float(current_step - num_warmup_steps) / float(max(1, total_steps - num_warmup_steps))
-                return (1.0 - progress) * (1.0 - (min_lr / learning_rate)) + (min_lr / learning_rate)
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
-    elif scheduler_type == "cosine":
-        def cosine_lr_lambda(current_step):
-            if current_step < num_warmup_steps:
-                return float(current_step) / float(max(1, num_warmup_steps))
-            else:
-                progress = float(current_step - num_warmup_steps) / float(max(1, total_steps - num_warmup_steps))
-                cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
-                return cosine_decay * (1.0 - (min_lr / learning_rate)) + (min_lr / learning_rate)
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, cosine_lr_lambda)
-    else:
-        raise ValueError(f"Unknown scheduler_type: {scheduler_type}")
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, lr_lambda(scheduler_type, num_warmup_steps, total_steps, learning_rate, min_lr))
 
 
 

@@ -78,19 +78,31 @@ def stop_rule_suffix(stop_rule='pooled'):
     return "" if stop_rule == 'pooled' else f"-stop_{stop_rule}"
 
 
+def warmup_suffix(warmup_frac=None):
+    """'' by default (the setup's fixed warmup); '-warmup_frac_<f>' when the warmup is scaled to the budget."""
+    return "" if warmup_frac is None else f"-warmup_frac_{fmt(warmup_frac)}"
+
+
+def warmup_optimizer_steps(warmup_frac, fixed_steps):
+    """--warmup_frac: warmup length in optimizer steps, max(1, round(warmup_frac * fixed_steps))."""
+    return max(1, round(warmup_frac * fixed_steps))
+
+
 def fmt(x):
     """0.1 -> '0.1', 0.30000000000000004 -> '0.3', 0.0 -> '0.0' (matches upstream's str(float))."""
     return str(round(float(x), 6))
 
 
 def partial_distill_name(arm, alpha, beta, seed, stop_mode='fixed_steps', fixed_steps=FIXED_STEPS, kor_targets='uniform',
-                         teacher_lr=TEACHER_LR, epochs=EPOCHS, stop_rule='pooled'):
+                         teacher_lr=TEACHER_LR, epochs=EPOCHS, stop_rule='pooled', warmup_frac=None):
     if stop_rule != 'pooled' and stop_mode != 'early':
         raise ValueError(f"stop_rule {stop_rule!r} applies only to stop_mode 'early'")
+    if warmup_frac is not None and stop_mode != 'fixed_steps':
+        raise ValueError("warmup_frac applies only to stop_mode 'fixed_steps'")
     return (f"partial_distill_models/gemma-2-0.1B-language-partial_distill-teacher_lr_{lr_tag(teacher_lr)}"
             f"-arm_{arm_label(arm, kor_targets)}"
             f"-alpha_{fmt(alpha)}-beta_{fmt(beta)}-seed_{seed}-{stop_label(stop_mode, fixed_steps, epochs)}"
-            f"{stop_rule_suffix(stop_rule)}")
+            f"{stop_rule_suffix(stop_rule)}{warmup_suffix(warmup_frac)}")
 
 
 def relearn_record_dir(model):

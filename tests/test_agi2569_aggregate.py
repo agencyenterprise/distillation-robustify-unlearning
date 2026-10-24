@@ -222,3 +222,25 @@ def test_stop_rule_names(records):
     assert (meta["arm"], meta["alpha"], meta["stop"]) == ("A", 0.7, "early_stop-stop_any_shard")
     epochs2 = partial_distill_name("A", 0.7, 0.1, 111, "early", epochs=2, stop_rule="any_shard")
     assert aggregate.describe_model(relearn_record_dir(epochs2))["stop"] == "early_stop_epochs_2-stop_any_shard"
+
+
+def test_warmup_frac_names(records):
+    """--warmup_frac: '-warmup_frac_<f>' on fixed_steps names only, parsed into its own field; default names unchanged."""
+    plain = partial_distill_name("A", 0.2, 0.1, 111, "fixed_steps", 12)
+    assert partial_distill_name("A", 0.2, 0.1, 111, "fixed_steps", 12, warmup_frac=None) == plain
+    wu = partial_distill_name("A", 0.2, 0.1, 111, "fixed_steps", 12, warmup_frac=0.1)
+    assert wu == plain + "-warmup_frac_0.1"
+    with pytest.raises(ValueError):
+        partial_distill_name("A", 0.2, 0.1, 111, "early", warmup_frac=0.1)
+    assert aggregate.describe_model(relearn_record_dir(plain))["warmup_frac"] is None
+    meta = aggregate.describe_model(relearn_record_dir(wu))
+    assert (meta["arm"], meta["alpha"], meta["stop"], meta["warmup_frac"]) == ("A", 0.2, "fixed_steps_12", 0.1)
+    ce = partial_distill_name("D", 0.2, 0.1, 111, "fixed_steps", 16, "uniform", warmup_frac=0.1)
+    assert aggregate.describe_model(relearn_record_dir(ce))["stop"] == "fixed_steps_16"
+    assert aggregate.describe_model(relearn_record_dir(partial_distill_name("A", 0.7, 0.1, 111, "early",
+                                                                            stop_rule="any_shard")))["warmup_frac"] is None
+
+
+def test_warmup_optimizer_steps():
+    from src.utils.run_names import warmup_optimizer_steps
+    assert [warmup_optimizer_steps(0.1, n) for n in (12, 16, 60, 81, 302, 403, 3)] == [1, 2, 6, 8, 30, 40, 1]

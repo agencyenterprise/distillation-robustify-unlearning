@@ -54,7 +54,8 @@ KL_ARMS = ("A", "B")
 PARTIAL_RE = re.compile(
     r"partial_distill-teacher_lr_(?P<teacher_lr>[\d.e+-]+)-arm_(?P<arm>[A-G](?:_uniform|_unigram)?)"
     r"-alpha_(?P<alpha>[\d.]+)-beta_(?P<beta>[\d.]+)-seed_(?P<seed>\d+)-(?P<stop>fixed_steps_\d+|early_stop_epochs_\d+|early_stop|epochs_\d+)"
-    r"(?P<stop_rule>-stop_any_shard)?$"   # --stop_rule any_shard runs (pooled runs have no suffix)
+    r"(?P<stop_rule>-stop_any_shard)?"   # --stop_rule any_shard runs (pooled runs have no suffix)
+    r"(?:-warmup_frac_(?P<warmup_frac>[\d.]+))?$"   # --warmup_frac runs (the setup's warmup: no suffix)
 )
 RECORD_RE = re.compile(r"^(?P<lr>[^_]+)(?:_eval_every_(?P<eval_every>\d+))?_only_forget_data\.txt$")
 ATTACK_LRS = (1e-3, 7e-4, 4e-4, 1e-4, 7e-5, 5e-5, 1e-5, 7e-6, 4e-6, 1e-6)  # run_relearn_language.py LRS_TO_RUN
@@ -72,14 +73,16 @@ def describe_model(record_dir, teacher_lr=TEACHER_LR):
     ref_dirs = {relearn_record_dir(path): role for role, path in reference_models(teacher_lr).items()}
     if record_dir in ref_dirs:
         return {"model": record_dir, "role": ref_dirs[record_dir], "arm": None, "alpha": None, "beta": None,
-                "seed": None, "stop": None}
+                "seed": None, "stop": None, "warmup_frac": None}
     match = PARTIAL_RE.search(record_dir)
     if match is None or match["teacher_lr"] != lr_tag(teacher_lr):
         return None
     return {"model": record_dir, "role": "partial", "arm": match["arm"], "alpha": float(match["alpha"]),
             "beta": float(match["beta"]), "seed": int(match["seed"]),
             # any_shard runs keep the suffix in `stop` ('early_stop-stop_any_shard'), a series of their own
-            "stop": match["stop"] + (match["stop_rule"] or "")}
+            "stop": match["stop"] + (match["stop_rule"] or ""),
+            # --warmup_frac runs: the fraction (stop stays 'fixed_steps_<n>'); None for the setup's fixed warmup
+            "warmup_frac": None if match["warmup_frac"] is None else float(match["warmup_frac"])}
 
 
 def load_relearn_curves(records_root, teacher_lr=TEACHER_LR):
@@ -143,7 +146,7 @@ def worst_case(curves):
     curves = _complete(curves)
     rows = []
     for model, group in curves.groupby("model"):
-        meta = group.iloc[0][["model", "role", "arm", "alpha", "beta", "seed", "stop"]].to_dict()
+        meta = group.iloc[0][["model", "role", "arm", "alpha", "beta", "seed", "stop", "warmup_frac"]].to_dict()
         meta["eval_every"] = group.eval_every.max()
         start = group[group.step == 0]
         before = {"kor_loss_before": start.kor_loss.mean(), "eng_loss_before": start.eng_loss.mean()}
@@ -164,7 +167,7 @@ def worst_case_curve(curves):
     curves = curves[curves.complete]
     n_lrs = curves.groupby("model").lr.transform("nunique")
     curves = curves[curves.groupby(["model", "step"]).lr.transform("nunique") == n_lrs]
-    return curves.groupby(["model", "role", "arm", "alpha", "stop", "step"], dropna=False).kor_loss.min().reset_index()
+    return curves.groupby(["model", "role", "arm", "alpha", "stop", "warmup_frac", "step"], dropna=False).kor_loss.min().reset_index()
 
 
 def add_robustness(summary):

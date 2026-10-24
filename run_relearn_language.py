@@ -260,7 +260,7 @@ def agi2569_models(args):
                             for stop_mode in args.stop_modes:
                                 models.append(partial_distill_name(arm, alpha, beta, seed, stop_mode, args.fixed_steps,
                                                                    kor_targets, args.teacher_lr, args.epochs,
-                                                                   args.stop_rule))
+                                                                   args.stop_rule, args.warmup_frac))
     return models
 
 if __name__ == "__main__":
@@ -278,6 +278,9 @@ if __name__ == "__main__":
     parser.add_argument('--stop_rule', choices=STOP_RULES, default='pooled',
                         help="Partial models of --stop_modes early trained with this early-stop rule (any_shard: "
                              "the '-stop_any_shard' runs)")
+    parser.add_argument('--warmup_frac', type=float, default=None,
+                        help="Partial models of --stop_modes fixed_steps trained with this --warmup_frac (the "
+                             "'-warmup_frac_<f>' runs)")
     parser.add_argument('--epochs', type=int, default=EPOCHS, help='Partial models of --stop_modes epoch (their epochs) or early (their cap on passes; default 1)')
     parser.add_argument('--teacher_lr', type=float, default=TEACHER_LR,
                         help='MaxEnt teacher LR of the unlearn/full_distill refs and partial models (default 8e-5)')

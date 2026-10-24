@@ -21,6 +21,9 @@ spans its epoch). Epoch mode is for runs that early stop would end at once, e.g.
 --stop_rule (early mode): 'pooled' (default) tests English loss over the whole validation set; 'any_shard' is upstream's
 rule, stopping when any rank's own validation shard is within 5% of the teacher on that shard. any_shard runs get a
 '-stop_any_shard' name suffix and log every shard's loss at each check.
+--warmup_frac (fixed_steps mode): warm up over max(1, round(warmup_frac x fixed_steps)) optimizer steps instead of the
+setup's 50 scheduler ticks (12.5 optimizer steps on 4 GPUs, longer than a very short run), then cosine to min_lr at the
+last step. Runs get a '-warmup_frac_<f>' name suffix; unset, names and schedule are unchanged.
 
 GPUs: the paper ran every language UNDO run on 4 H200s (arXiv 2506.06278, App. E): per-process batch 4 x 60
 accumulation, so 960 sequences per optimizer step. --gpus_per_run 4 reproduces this; the step and schedule
@@ -34,7 +37,7 @@ from src.tools.partial_distill_langarith import load_tokenizer, load_train_datas
 from src.utils.paths import CACHE_DIR, DATASET_DIR, MODEL_DIR, USE_WANDB, WANDB_API_KEY
 from src.utils.run_names import (
     ARMS, EPOCHS, KOR_TARGETS, STOP_MODES, STOP_RULES, SWEEP_ALPHAS, SWEEP_BETAS, SWEEP_SEEDS, FIXED_STEPS, TEACHER_LR,
-    partial_distill_name, reference_models,
+    partial_distill_name, reference_models, warmup_optimizer_steps,
 )
 from accelerate import Accelerator
 from utils.loss_functions import print_acc, custom_login
@@ -175,7 +178,8 @@ def never_stop_cond_fn(student_eval_dict, teacher_eval_dict):
     return False
 
 def run_experiment(setup_id, alpha, beta, seed=None, arm='A', kor_targets='uniform', stop_mode='fixed_steps',
-                   fixed_steps=FIXED_STEPS, max_steps=None, teacher_lr=TEACHER_LR, epochs=EPOCHS, stop_rule='pooled'):
+                   fixed_steps=FIXED_STEPS, max_steps=None, teacher_lr=TEACHER_LR, epochs=EPOCHS, stop_rule='pooled',
+                   warmup_frac=None):
     """Run a single experiment. max_steps caps early-stop runs (default: none, as upstream)."""
     current_setup = setups[setup_id].copy()
     arm_config = ARM_CONFIGS[arm]
@@ -185,7 +189,7 @@ def run_experiment(setup_id, alpha, beta, seed=None, arm='A', kor_targets='unifo
         current_setup['seed'] = seed
 
     model_name = partial_distill_name(arm, alpha, beta, current_setup['seed'], stop_mode, fixed_steps, kor_targets,
-                                      teacher_lr, epochs, stop_rule)
+                                      teacher_lr, epochs, stop_rule, warmup_frac)
     current_setup['output_dir'] = current_setup['output_dir'].replace('model_name', model_name)
     current_setup['path_local_record'] = current_setup['path_local_record'].replace('model_name', model_name)
     current_setup['teacher_model_name'] = model_path('unlearn', teacher_lr)
@@ -285,6 +289,7 @@ def run_experiment(setup_id, alpha, beta, seed=None, arm='A', kor_targets='unifo
         random_target_domain='kor' if arm_config['random_kor'] else None,
         random_target_counts_path=KOR_UNIGRAM_COUNTS if (arm_config['random_kor'] and kor_targets == 'unigram') else None,
         schedule_over_max_steps=(stop_mode == 'fixed_steps'),
+        warmup_optimizer_steps=None if warmup_frac is None else warmup_optimizer_steps(warmup_frac, fixed_steps),
     )
 
 def arrow_files():
@@ -314,12 +319,14 @@ def warm_cache(args):
     print(f"[warm_cache] {len(arrow_files() - before)} new cache files in {CACHE_DIR} (0: every cache existed)")
 
 def experiment_cli_args(experiment):
-    setup_id, alpha, beta, seed, arm, kor_targets, stop_mode, fixed_steps, max_steps, teacher_lr, epochs, stop_rule = experiment
+    setup_id, alpha, beta, seed, arm, kor_targets, stop_mode, fixed_steps, max_steps, teacher_lr, epochs, stop_rule, warmup_frac = experiment
     cmd = ["--setup", setup_id, "--alpha", str(alpha), "--beta", str(beta), "--seed", str(seed), "--arm", arm,
            "--kor_targets", kor_targets, "--stop_mode", stop_mode, "--fixed_steps", str(fixed_steps),
            "--teacher_lr", str(teacher_lr), "--epochs", str(epochs), "--stop_rule", stop_rule]
     if max_steps is not None:
         cmd.extend(["--max_steps", str(max_steps)])
+    if warmup_frac is not None:
+        cmd.extend(["--warmup_frac", str(warmup_frac)])
     return cmd
 
 def launch_single_experiment(experiment):
@@ -352,7 +359,7 @@ def run_all_experiments(args):
     """Run all experiments in the sweep, optionally starting from a specific alpha"""
     alphas = [a for a in args.alphas if args.start_alpha is None or a >= args.start_alpha]
     experiments = [(setup_id, alpha, beta, seed, arm, args.kor_targets, args.stop_mode, args.fixed_steps, args.max_steps,
-                    args.teacher_lr, args.epochs, args.stop_rule)
+                    args.teacher_lr, args.epochs, args.stop_rule, args.warmup_frac)
                    for setup_id in SETUPS_TO_RUN
                    for arm in args.arms
                    for alpha in alphas
@@ -413,6 +420,10 @@ if __name__ == "__main__":
     parser.add_argument('--max_steps', type=int, default=None,
                         help='early mode only: cap on optimizer steps. Like upstream max_steps it also shortens the '
                              'cosine schedule, so leave it unset to match the paper (an epoch is the cap there)')
+    parser.add_argument('--warmup_frac', type=float, default=None,
+                        help="fixed_steps mode only: warm up over max(1, round(warmup_frac * fixed_steps)) optimizer "
+                             "steps instead of the setup's 50 ticks, then cosine to min_lr; adds "
+                             "'-warmup_frac_<f>' to the run name. Unset: the setup's warmup, names unchanged")
     parser.add_argument('--teacher_lr', type=float, default=TEACHER_LR,
                         help='MaxEnt teacher LR (default 8e-5, the paper\'s; upstream hard-coded 3e-5)')
     parser.add_argument('--epochs', type=int, default=EPOCHS, help='epoch mode: passes over the training data; early mode: the cap on passes (default 1)')
@@ -430,6 +441,8 @@ if __name__ == "__main__":
     parser.add_argument('--warm_cache', action='store_true',
                         help='Sweep: only build the datasets caches its runs read (one process, no GPU), then exit')
     args = parser.parse_args()
+    if args.warmup_frac is not None and args.stop_mode != 'fixed_steps':
+        parser.error("--warmup_frac applies only to --stop_mode fixed_steps")
 
     if args.warm_cache:
         warm_cache(args)
@@ -439,7 +452,8 @@ if __name__ == "__main__":
     if args.alpha is not None and args.beta is not None:
         print(f"Running single experiment: arm {args.arm}, alpha {args.alpha}, beta {args.beta}, seed {args.seed}, {args.stop_mode}")
         run_experiment(args.setup, args.alpha, args.beta, args.seed, args.arm, args.kor_targets,
-                       args.stop_mode, args.fixed_steps, args.max_steps, args.teacher_lr, args.epochs, args.stop_rule)
+                       args.stop_mode, args.fixed_steps, args.max_steps, args.teacher_lr, args.epochs, args.stop_rule,
+                       args.warmup_frac)
 
     # If run_all flag is set, run all experiments
     elif args.run_all or args.start_alpha is not None:
