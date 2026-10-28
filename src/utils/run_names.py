@@ -49,6 +49,11 @@ STOP_MODES = ['fixed_steps', 'early', 'epoch']
 # Early-stop rule: 'pooled' (ours: English loss over the whole validation set) or 'any_shard' (upstream: stop when any
 # rank's own validation shard is within the threshold). Only 'any_shard' adds to the name, so pooled names are unchanged.
 STOP_RULES = ['pooled', 'any_shard']
+# What the one-time noise hits (AGI-2635): 'all' (upstream: every 2-D parameter), or a fraction of the MLP neurons,
+# chosen by forget/retain activation saliency ('neuron_act') or uniformly at random ('neuron_rand', its control).
+# Only the targeted modes add to the name, so 'all' names are unchanged.
+NOISE_TARGETS = ['all', 'neuron_act', 'neuron_rand']
+SALIENCY_SEQS = 64        # neuron_act: Korean and English train sequences each used to score neurons
 
 SWEEP_ALPHAS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
 SWEEP_BETAS = [0.1]
@@ -83,6 +88,21 @@ def warmup_suffix(warmup_frac=None):
     return "" if warmup_frac is None else f"-warmup_frac_{fmt(warmup_frac)}"
 
 
+def noise_suffix(noise_target='all', noise_frac=None, saliency_seqs=SALIENCY_SEQS):
+    """'' for 'all'; '-nt_act_f<frac>' / '-nt_rand_f<frac>' for targeted noise, plus '_s<n>' when neuron_act scores
+    neurons on a non-default number of sequences."""
+    if noise_target not in NOISE_TARGETS:
+        raise ValueError(f"unknown noise_target {noise_target!r}")
+    if noise_target == 'all':
+        if noise_frac is not None:
+            raise ValueError("noise_frac applies only to targeted noise (neuron_act, neuron_rand)")
+        return ""
+    if noise_frac is None or not 0 < noise_frac <= 1:
+        raise ValueError(f"noise_target {noise_target!r} needs 0 < noise_frac <= 1, got {noise_frac!r}")
+    seqs = f"_s{saliency_seqs}" if noise_target == 'neuron_act' and saliency_seqs != SALIENCY_SEQS else ""
+    return f"-nt_{noise_target.split('_')[1]}_f{fmt(noise_frac)}{seqs}"
+
+
 def warmup_optimizer_steps(warmup_frac, fixed_steps):
     """--warmup_frac: warmup length in optimizer steps, max(1, round(warmup_frac * fixed_steps))."""
     return max(1, round(warmup_frac * fixed_steps))
@@ -94,7 +114,8 @@ def fmt(x):
 
 
 def partial_distill_name(arm, alpha, beta, seed, stop_mode='fixed_steps', fixed_steps=FIXED_STEPS, kor_targets='uniform',
-                         teacher_lr=TEACHER_LR, epochs=EPOCHS, stop_rule='pooled', warmup_frac=None):
+                         teacher_lr=TEACHER_LR, epochs=EPOCHS, stop_rule='pooled', warmup_frac=None,
+                         noise_target='all', noise_frac=None, saliency_seqs=SALIENCY_SEQS):
     if stop_rule != 'pooled' and stop_mode != 'early':
         raise ValueError(f"stop_rule {stop_rule!r} applies only to stop_mode 'early'")
     if warmup_frac is not None and stop_mode != 'fixed_steps':
@@ -102,7 +123,7 @@ def partial_distill_name(arm, alpha, beta, seed, stop_mode='fixed_steps', fixed_
     return (f"partial_distill_models/gemma-2-0.1B-language-partial_distill-teacher_lr_{lr_tag(teacher_lr)}"
             f"-arm_{arm_label(arm, kor_targets)}"
             f"-alpha_{fmt(alpha)}-beta_{fmt(beta)}-seed_{seed}-{stop_label(stop_mode, fixed_steps, epochs)}"
-            f"{stop_rule_suffix(stop_rule)}{warmup_suffix(warmup_frac)}")
+            f"{stop_rule_suffix(stop_rule)}{warmup_suffix(warmup_frac)}{noise_suffix(noise_target, noise_frac, saliency_seqs)}")
 
 
 def relearn_record_dir(model):

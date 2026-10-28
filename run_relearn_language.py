@@ -18,7 +18,7 @@ from utils.loss_functions import print_acc
 from utils.validation_functions import get_korean_and_english_evalaution_fn
 from utils.parallel_launch import launch_in_parallel_one_per_gpu, get_parallel_launch_wrapper
 from src.utils.run_names import (
-    REFERENCE_MODELS, ARMS, EPOCHS, RANDOM_TARGET_ARMS, KOR_TARGETS, STOP_MODES, STOP_RULES, SWEEP_ALPHAS, SWEEP_BETAS, SWEEP_SEEDS,
+    REFERENCE_MODELS, ARMS, EPOCHS, RANDOM_TARGET_ARMS, KOR_TARGETS, NOISE_TARGETS, SALIENCY_SEQS, STOP_MODES, STOP_RULES, SWEEP_ALPHAS, SWEEP_BETAS, SWEEP_SEEDS,
     FIXED_STEPS, RELEARN_EVAL_EVERY, TEACHER_LR, partial_distill_name, reference_models, relearn_run_name,
 )
 
@@ -260,7 +260,9 @@ def agi2569_models(args):
                             for stop_mode in args.stop_modes:
                                 models.append(partial_distill_name(arm, alpha, beta, seed, stop_mode, args.fixed_steps,
                                                                    kor_targets, args.teacher_lr, args.epochs,
-                                                                   args.stop_rule, args.warmup_frac))
+                                                                   args.stop_rule, args.warmup_frac,
+                                                                   args.noise_target, args.noise_frac,
+                                                                   args.saliency_seqs))
     return models
 
 if __name__ == "__main__":
@@ -281,6 +283,11 @@ if __name__ == "__main__":
     parser.add_argument('--warmup_frac', type=float, default=None,
                         help="Partial models of --stop_modes fixed_steps trained with this --warmup_frac (the "
                              "'-warmup_frac_<f>' runs)")
+    parser.add_argument('--noise_target', choices=NOISE_TARGETS, default='all',
+                        help="Partial models trained with this --noise_target (neuron_act/neuron_rand: the "
+                             "'-nt_*' runs)")
+    parser.add_argument('--noise_frac', type=float, default=None, help='... and this --noise_frac')
+    parser.add_argument('--saliency_seqs', type=int, default=SALIENCY_SEQS, help='... and this --saliency_seqs')
     parser.add_argument('--epochs', type=int, default=EPOCHS, help='Partial models of --stop_modes epoch (their epochs) or early (their cap on passes; default 1)')
     parser.add_argument('--teacher_lr', type=float, default=TEACHER_LR,
                         help='MaxEnt teacher LR of the unlearn/full_distill refs and partial models (default 8e-5)')

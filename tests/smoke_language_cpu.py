@@ -104,6 +104,16 @@ def main():
         assert {k.split("_")[-1] for k in record if k.startswith("train/loss_tokens_")} == expected, record
         print(f"[smoke] arm {arm} {kor_targets} {stop_mode} OK: {record}")
     assert cache_files() == warm, sorted(cache_files() - warm)
+    # Targeted noise (AGI-2635), arm F: the selection record lands next to the run's record (what sync_s3.sh uploads).
+    for target in ("neuron_act", "neuron_rand"):
+        pd.run_experiment("gemma-2-0.1B_MaxEnt", 1.0, 1.0, 111, "F", "uniform", "early", max_steps=2,
+                          noise_target=target, noise_frac=0.05, saliency_seqs=4)
+        name = partial_distill_name("F", 1.0, 1.0, 111, "early", noise_target=target, noise_frac=0.05, saliency_seqs=4)
+        assert os.path.exists(f"{MODEL_DIR}/{name}/final_model/config.json"), name
+        with open(f"{MODEL_DIR}/local_records/{name}_noise_selection.json") as f:
+            selection = json.load(f)
+        assert selection["k"] == round(0.05 * selection["total_neurons"]) == sum(selection["per_layer_counts"])
+        print(f"[smoke] arm F {target} OK: k={selection['k']}, {selection.get('score_summary')}")
     # Rerun is a no-op.
     pd.run_experiment("gemma-2-0.1B_MaxEnt", 0.3, 0.1, 111, "A", "uniform", "fixed_steps", fixed_steps=3)
 

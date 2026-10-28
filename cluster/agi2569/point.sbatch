@@ -11,6 +11,8 @@
 # that model's 10 relearn attacks (eval every 25), one per GPU, 4 at a time (as relearn.sbatch). Scheduling only: the
 # same scripts and arguments as the two separate jobs. Arguments: arm, alpha, then flags both scripts take, e.g.
 #   sbatch --export=ALL,AGI2569_V=2,PRECISION=fp32,MATMUL_PRECISION=high cluster/agi2569/point.sbatch D 0.6 --kor_targets uniform
+# Targeted noise (AGI-2635) flags go to both stages too, so the relearn finds the '-nt_*' model, e.g.
+#   sbatch cluster/agi2569/point.sbatch F 1.0 --betas 1.0 --noise_target neuron_act --noise_frac 0.05
 # PRECISION/MATMUL_PRECISION apply to the partial stage only; the relearn stage runs with relearn.sbatch's defaults
 # (bf16 mixed precision, PyTorch's matmul precision). Each stage skips finished runs, so a rerun picks up where it
 # stopped. Exits non-zero if the partial run fails or any attack has no record reaching step 500.

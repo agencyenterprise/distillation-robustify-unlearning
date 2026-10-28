@@ -24,6 +24,11 @@ rule, stopping when any rank's own validation shard is within 5% of the teacher 
 --warmup_frac (fixed_steps mode): warm up over max(1, round(warmup_frac x fixed_steps)) optimizer steps instead of the
 setup's 50 scheduler ticks (12.5 optimizer steps on 4 GPUs, longer than a very short run), then cosine to min_lr at the
 last step. Runs get a '-warmup_frac_<f>' name suffix; unset, names and schedule are unchanged.
+--noise_target (AGI-2635): 'all' (default) noises every 2-D parameter. 'neuron_act' / 'neuron_rand' noise only
+round(--noise_frac x all MLP neurons) neurons (gate/up_proj rows, down_proj column), the top ones by mean |down_proj
+input| on Korean / English train sequences (--saliency_seqs of each, from the student before noising) or a random
+set (seeded by --seed); the whole model is then retrained as usual. Runs get a '-nt_act_f<f>' / '-nt_rand_f<f>'
+name suffix, and the selection is written next to the run's record as <record>_noise_selection.json.
 
 GPUs: the paper ran every language UNDO run on 4 H200s (arXiv 2506.06278, App. E): per-process batch 4 x 60
 accumulation, so 960 sequences per optimizer step. --gpus_per_run 4 reproduces this; the step and schedule
@@ -36,7 +41,7 @@ Launch Command (Sweep):      python run_partial_distill_language.py --run_all --
 from src.tools.partial_distill_langarith import load_tokenizer, load_train_dataset, partial_distill
 from src.utils.paths import CACHE_DIR, DATASET_DIR, MODEL_DIR, USE_WANDB, WANDB_API_KEY
 from src.utils.run_names import (
-    ARMS, EPOCHS, KOR_TARGETS, STOP_MODES, STOP_RULES, SWEEP_ALPHAS, SWEEP_BETAS, SWEEP_SEEDS, FIXED_STEPS, TEACHER_LR,
+    ARMS, EPOCHS, KOR_TARGETS, NOISE_TARGETS, SALIENCY_SEQS, STOP_MODES, STOP_RULES, SWEEP_ALPHAS, SWEEP_BETAS, SWEEP_SEEDS, FIXED_STEPS, TEACHER_LR,
     partial_distill_name, reference_models, warmup_optimizer_steps,
 )
 from accelerate import Accelerator
@@ -179,7 +184,7 @@ def never_stop_cond_fn(student_eval_dict, teacher_eval_dict):
 
 def run_experiment(setup_id, alpha, beta, seed=None, arm='A', kor_targets='uniform', stop_mode='fixed_steps',
                    fixed_steps=FIXED_STEPS, max_steps=None, teacher_lr=TEACHER_LR, epochs=EPOCHS, stop_rule='pooled',
-                   warmup_frac=None):
+                   warmup_frac=None, noise_target='all', noise_frac=None, saliency_seqs=SALIENCY_SEQS):
     """Run a single experiment. max_steps caps early-stop runs (default: none, as upstream)."""
     current_setup = setups[setup_id].copy()
     arm_config = ARM_CONFIGS[arm]
@@ -189,7 +194,8 @@ def run_experiment(setup_id, alpha, beta, seed=None, arm='A', kor_targets='unifo
         current_setup['seed'] = seed
 
     model_name = partial_distill_name(arm, alpha, beta, current_setup['seed'], stop_mode, fixed_steps, kor_targets,
-                                      teacher_lr, epochs, stop_rule, warmup_frac)
+                                      teacher_lr, epochs, stop_rule, warmup_frac, noise_target, noise_frac,
+                                      saliency_seqs)
     current_setup['output_dir'] = current_setup['output_dir'].replace('model_name', model_name)
     current_setup['path_local_record'] = current_setup['path_local_record'].replace('model_name', model_name)
     current_setup['teacher_model_name'] = model_path('unlearn', teacher_lr)
@@ -290,6 +296,14 @@ def run_experiment(setup_id, alpha, beta, seed=None, arm='A', kor_targets='unifo
         random_target_counts_path=KOR_UNIGRAM_COUNTS if (arm_config['random_kor'] and kor_targets == 'unigram') else None,
         schedule_over_max_steps=(stop_mode == 'fixed_steps'),
         warmup_optimizer_steps=None if warmup_frac is None else warmup_optimizer_steps(warmup_frac, fixed_steps),
+        noise_target=noise_target,
+        noise_frac=noise_frac,
+        saliency_seqs=saliency_seqs,
+        # Forget, retain: train files (valid_kor is the relearn attack's eval set), loaded here for every arm.
+        saliency_files=(KOR_TRAIN_FILE, ENG_TRAIN_FILE),
+        # The local_records copy is what sync_s3.sh uploads; the output_dir copy sits with the model.
+        noise_record_paths=(current_setup['path_local_record'][:-len('.txt')] + '_noise_selection.json',
+                            os.path.join(current_setup['output_dir'], 'noise_selection.json')),
     )
 
 def arrow_files():
@@ -310,7 +324,10 @@ def warm_cache(args):
         dataset_cache_dir=current_setup['dataset_cache_dir'], cache_dir=current_setup['cache_dir'],
         batch_size=current_setup['batch_size'], accelerator=accelerator)
     tokenizer = load_tokenizer(teacher, current_setup['cache_dir'])
-    for domains, seed in sorted({(tuple(ARM_CONFIGS[arm]['domains']), seed) for arm in args.arms for seed in args.seeds}):
+    domain_sets = {(tuple(ARM_CONFIGS[arm]['domains']), seed) for arm in args.arms for seed in args.seeds}
+    if getattr(args, 'noise_target', 'all') == 'neuron_act':  # saliency reads each train file on its own (seed unused for one file)
+        domain_sets |= {(('kor',), seed) for seed in args.seeds} | {(('eng',), seed) for seed in args.seeds}
+    for domains, seed in sorted(domain_sets):
         train_ds = load_train_dataset([TRAIN_FILES[d] for d in domains], tokenizer, current_setup['max_length'], True,
                                       [1.0 / len(domains)] * len(domains), seed, 'first_exhausted',
                                       current_setup['dataset_cache_dir'])
@@ -319,7 +336,8 @@ def warm_cache(args):
     print(f"[warm_cache] {len(arrow_files() - before)} new cache files in {CACHE_DIR} (0: every cache existed)")
 
 def experiment_cli_args(experiment):
-    setup_id, alpha, beta, seed, arm, kor_targets, stop_mode, fixed_steps, max_steps, teacher_lr, epochs, stop_rule, warmup_frac = experiment
+    (setup_id, alpha, beta, seed, arm, kor_targets, stop_mode, fixed_steps, max_steps, teacher_lr, epochs, stop_rule,
+     warmup_frac, noise_target, noise_frac, saliency_seqs) = experiment
     cmd = ["--setup", setup_id, "--alpha", str(alpha), "--beta", str(beta), "--seed", str(seed), "--arm", arm,
            "--kor_targets", kor_targets, "--stop_mode", stop_mode, "--fixed_steps", str(fixed_steps),
            "--teacher_lr", str(teacher_lr), "--epochs", str(epochs), "--stop_rule", stop_rule]
@@ -327,6 +345,9 @@ def experiment_cli_args(experiment):
         cmd.extend(["--max_steps", str(max_steps)])
     if warmup_frac is not None:
         cmd.extend(["--warmup_frac", str(warmup_frac)])
+    if noise_target != 'all':
+        cmd.extend(["--noise_target", noise_target, "--noise_frac", str(noise_frac),
+                    "--saliency_seqs", str(saliency_seqs)])
     return cmd
 
 def launch_single_experiment(experiment):
@@ -359,7 +380,8 @@ def run_all_experiments(args):
     """Run all experiments in the sweep, optionally starting from a specific alpha"""
     alphas = [a for a in args.alphas if args.start_alpha is None or a >= args.start_alpha]
     experiments = [(setup_id, alpha, beta, seed, arm, args.kor_targets, args.stop_mode, args.fixed_steps, args.max_steps,
-                    args.teacher_lr, args.epochs, args.stop_rule, args.warmup_frac)
+                    args.teacher_lr, args.epochs, args.stop_rule, args.warmup_frac, args.noise_target,
+                    args.noise_frac, args.saliency_seqs)
                    for setup_id in SETUPS_TO_RUN
                    for arm in args.arms
                    for alpha in alphas
@@ -424,6 +446,15 @@ if __name__ == "__main__":
                         help="fixed_steps mode only: warm up over max(1, round(warmup_frac * fixed_steps)) optimizer "
                              "steps instead of the setup's 50 ticks, then cosine to min_lr; adds "
                              "'-warmup_frac_<f>' to the run name. Unset: the setup's warmup, names unchanged")
+    parser.add_argument('--noise_target', choices=NOISE_TARGETS, default='all',
+                        help="'all' (default): noise every 2-D parameter. 'neuron_act' / 'neuron_rand': noise only "
+                             "--noise_frac of the MLP neurons (by Korean/English saliency, or at random); adds "
+                             "'-nt_act_f<f>' / '-nt_rand_f<f>' to the run name")
+    parser.add_argument('--noise_frac', type=float, default=None,
+                        help='targeted noise: fraction of all MLP neurons (all layers) to noise, e.g. 0.05')
+    parser.add_argument('--saliency_seqs', type=int, default=SALIENCY_SEQS,
+                        help='neuron_act: Korean and English train sequences each to score neurons on (default 64; '
+                             "other values add '_s<n>' to the name)")
     parser.add_argument('--teacher_lr', type=float, default=TEACHER_LR,
                         help='MaxEnt teacher LR (default 8e-5, the paper\'s; upstream hard-coded 3e-5)')
     parser.add_argument('--epochs', type=int, default=EPOCHS, help='epoch mode: passes over the training data; early mode: the cap on passes (default 1)')
@@ -443,6 +474,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.warmup_frac is not None and args.stop_mode != 'fixed_steps':
         parser.error("--warmup_frac applies only to --stop_mode fixed_steps")
+    if (args.noise_target == 'all') != (args.noise_frac is None):
+        parser.error("--noise_frac is required with, and only with, --noise_target neuron_act / neuron_rand")
 
     if args.warm_cache:
         warm_cache(args)
@@ -453,7 +486,7 @@ if __name__ == "__main__":
         print(f"Running single experiment: arm {args.arm}, alpha {args.alpha}, beta {args.beta}, seed {args.seed}, {args.stop_mode}")
         run_experiment(args.setup, args.alpha, args.beta, args.seed, args.arm, args.kor_targets,
                        args.stop_mode, args.fixed_steps, args.max_steps, args.teacher_lr, args.epochs, args.stop_rule,
-                       args.warmup_frac)
+                       args.warmup_frac, args.noise_target, args.noise_frac, args.saliency_seqs)
 
     # If run_all flag is set, run all experiments
     elif args.run_all or args.start_alpha is not None:

@@ -150,6 +150,20 @@ for arm, stop_mode in (("A", "fixed_steps"), ("D", "fixed_steps"), ("C", "early"
         print(f"[ddp smoke] arm {arm} {stop_mode} OK: {len(steps)} steps, {train[-1]['train/tokens_seen']} tokens, "
               f"noised checksum {sums[0]:.6f} on all ranks", flush=True)
 
+# Targeted noise (AGI-2635): the same neurons selected and the same noised student on every rank.
+for target in ("neuron_act", "neuron_rand"):
+    pd.run_experiment("gemma-2-0.1B_MaxEnt", 1.0, 1.0, 111, "F", "uniform", "early", max_steps=2,
+                      noise_target=target, noise_frac=0.05, saliency_seqs=4)
+    state.wait_for_everyone()
+    sums = [None] * NPROC
+    dist.all_gather_object(sums, noised[-1])
+    assert len(set(sums)) == 1, f"{target}: noised student differs across ranks: {sums}"
+    if state.is_main_process:
+        name = partial_distill_name("F", 1.0, 1.0, 111, "early", noise_target=target, noise_frac=0.05, saliency_seqs=4)
+        with open(f"{MODEL_DIR}/local_records/{name}_noise_selection.json") as f:
+            assert json.load(f)["k"] == round(0.05 * 2 * 64)
+        print(f"[ddp smoke] arm F {target} OK: noised checksum {sums[0]:.6f} on all ranks", flush=True)
+
 # A rerun is skipped on every rank (no hang, no new noising).
 before = len(noised)
 pd.run_experiment("gemma-2-0.1B_MaxEnt", 0.3, 0.1, 111, "A", "uniform", "fixed_steps", fixed_steps=STEPS)

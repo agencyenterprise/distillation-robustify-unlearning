@@ -96,6 +96,11 @@ def partial_distill(
     random_target_counts_path=None,
     schedule_over_max_steps=False,
     warmup_optimizer_steps=None,
+    noise_target="all",
+    noise_frac=None,
+    saliency_seqs=64,
+    saliency_files=None,
+    noise_record_paths=(),
 ):
     """
     Distillation script using Accelerate. Replaces standard CE with forward KL (KL(teacher||student)).
@@ -121,6 +126,14 @@ def partial_distill(
       warmup_optimizer_steps    None (default): warm up over num_warmup_steps ticks. An int (needs
                                 schedule_over_max_steps): warm up over this many optimizer steps instead
                                 (num_processes ticks each), then cosine to min_lr over the remaining steps.
+
+    Added for AGI-2635 (defaults reproduce the above):
+      noise_target              "all": noise every 2-D parameter (upstream). "neuron_act" / "neuron_rand": noise
+                                only round(noise_frac x all MLP neurons) neurons (gate/up_proj rows and the
+                                down_proj column), chosen by Korean/English activation saliency or at random
+                                (select_mlp_neurons). Everything is then retrained as usual.
+      saliency_seqs, saliency_files  neuron_act: score on this many sequences each of (forget, retain) train files.
+      noise_record_paths        targeted modes: where to write the selection JSON (noise_selection_record).
     """
     assert loss_type in ("kl", "ce"), loss_type
     assert random_target_domain is None or loss_type == "ce", "random targets need loss_type='ce'"
@@ -181,9 +194,35 @@ def partial_distill(
     # ------------------------------------------------------------
     # Shrink + Perturb (one-time, if requested)
     # ------------------------------------------------------------
+    # Targeted noise (AGI-2635): pick the neurons here, before the train set is loaded and before
+    # accelerator.prepare, on the unwrapped student. Every rank scores the neurons; rank 0's scores are broadcast so
+    # every rank selects the same ones.
+    neuron_masks = None
+    if noise_target != "all":
+        saliency_ds = None
+        if noise_target == "neuron_act":
+            with accelerator.main_process_first():
+                saliency_ds = [load_train_dataset([f], tokenizer, max_length, join_or_subsequence, [1.0], seed,
+                                                  stopping_strategy, dataset_cache_dir, print_message)
+                               for f in saliency_files]
+        neuron_masks, selection = select_mlp_neurons(
+            student_model, noise_target, noise_frac, seed, accelerator, saliency_ds=saliency_ds,
+            saliency_seqs=saliency_seqs, batch_size=batch_size, tokenizer=tokenizer, max_length=max_length)
+        if accelerator.is_main_process:
+            selection.update(noise_target=noise_target, noise_frac=noise_frac, noise_alpha=noise_alpha,
+                             noise_beta=noise_beta, seed=seed, saliency_seqs=saliency_seqs,
+                             saliency_files=list(saliency_files) if saliency_files else None,
+                             student_model_name=student_model_name)
+            for path in noise_record_paths:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(selection, f)
+        print_acc(f"[serum_original.py] Targeted noise ({noise_target}): {selection['k']} of "
+                  f"{selection['total_neurons']} MLP neurons, per layer {selection['per_layer_counts']}", print_message)
+
     if noise_alpha != 0.0:
         print_acc(f"[serum_original.py] Applying one-time shrink+perturb: noise={noise_alpha}", print_message)
-        do_corruption(student_model, noise_alpha, noise_beta)
+        do_corruption(student_model, noise_alpha, noise_beta, neuron_masks=neuron_masks)
 
 
 
@@ -290,7 +329,7 @@ def partial_distill(
 
         if shrink_perturb_repeat and noise_alpha != 0.0:
             print_acc(f"[serum_original.py] Re-applying shrink+perturb before epoch {epoch+1}", print_message)
-            do_corruption(student_model, noise_alpha, noise_beta)
+            do_corruption(student_model, noise_alpha, noise_beta, neuron_masks=neuron_masks)
 
         student_model.train()
         micro_kd_sum = 0.0
@@ -489,10 +528,97 @@ def load_train_dataset(train_files, tokenizer, max_length, join_or_subsequence, 
 # The do_corruption function is used for "noise-and-decay"
 ##############################################################
 
-def do_corruption(model, noise_alpha, noise_beta = 0.1, seed = 42):
+def mlp_modules(model):
+    """The (gate_proj, up_proj, down_proj) of each decoder layer of a Gemma(2)/Llama-style causal LM."""
+    model = getattr(model, "module", model)
+    return [(layer.mlp.gate_proj, layer.mlp.up_proj, layer.mlp.down_proj) for layer in model.model.layers]
+
+
+@torch.no_grad()
+def neuron_saliency(model, datasets, n_seqs, batch_size, tokenizer, max_length, device):
+    """Mean |input to down_proj| per MLP neuron over the non-pad tokens of the first n_seqs rows of each dataset.
+    Returns one [num_layers, intermediate_size] float64 tensor per dataset."""
+    mlps = mlp_modules(model)
+    collator = DataCollatorWithPadding(tokenizer=tokenizer, padding="max_length", max_length=max_length)
+    was_training = model.training
+    model.eval()
+    model.to(device)
+    out = []
+    for ds in datasets:
+        assert len(ds) >= n_seqs, f"saliency needs {n_seqs} sequences, the dataset has {len(ds)}"
+        sums = torch.zeros(len(mlps), mlps[0][2].in_features, dtype=torch.float64, device=device)
+        count = torch.zeros((), dtype=torch.float64, device=device)
+        mask = None
+
+        def hook(i):
+            def fn(module, args):
+                sums[i] += (args[0].abs().double() * mask[..., None]).sum(dim=(0, 1))
+            return fn
+        handles = [down.register_forward_pre_hook(hook(i)) for i, (_, _, down) in enumerate(mlps)]
+        try:
+            for start in range(0, n_seqs, batch_size):
+                rows = ds.select(range(start, min(start + batch_size, n_seqs)))
+                batch = collator([{"input_ids": r["input_ids"], "attention_mask": r["attention_mask"]} for r in rows])
+                mask = batch["attention_mask"].to(device).double()
+                count += mask.sum()
+                # The decoder only: the hooks need no logits (a 256k-vocab head would dominate memory).
+                model.model(input_ids=batch["input_ids"].to(device), attention_mask=batch["attention_mask"].to(device))
+        finally:
+            for h in handles:
+                h.remove()
+        out.append((sums / count).cpu())
+    model.train(was_training)
+    return out
+
+
+def select_mlp_neurons(model, noise_target, noise_frac, seed, accelerator=None, saliency_ds=None, saliency_seqs=64,
+                       batch_size=4, tokenizer=None, max_length=None, eps=1e-6):
+    """Pick k = round(noise_frac x all MLP neurons) neurons across all layers.
+      neuron_act   global top-k of mean|act| on forget (saliency_ds[0]) / (mean|act| on retain (saliency_ds[1]) + eps)
+      neuron_rand  k uniformly at random, from a torch.Generator seeded with `seed` (the global RNG is not used)
+    Returns ([num_layers] bool masks over each layer's neurons, a JSON-able record of the selection)."""
+    mlps = mlp_modules(model)
+    num_layers, width = len(mlps), mlps[0][2].in_features
+    total = num_layers * width
+    k = round(noise_frac * total)
+    assert 0 < k <= total, (noise_frac, total)
+    record = {"num_layers": num_layers, "intermediate_size": width, "total_neurons": total, "k": k}
+    if noise_target == "neuron_act":
+        device = accelerator.device if accelerator is not None else torch.device("cpu")
+        kor, eng = neuron_saliency(model, saliency_ds, saliency_seqs, batch_size, tokenizer, max_length, device)
+        scores = (kor / (eng + eps)).flatten()
+        if accelerator is not None and accelerator.num_processes > 1:
+            from accelerate.utils import broadcast
+            scores = broadcast(scores.to(accelerator.device), from_process=0).cpu()
+        chosen = torch.topk(scores, k).indices
+        top, median = scores[chosen].min().item(), scores.median().item()
+        record["score_summary"] = {
+            "eps": eps, "max": scores.max().item(), "kth_selected": top, "median_all": median,
+            "kth_selected_over_median": top / median, "median_selected": scores[chosen].median().item(),
+            "min": scores.min().item(),
+            "selected_median_over_median_all": scores[chosen].median().item() / median}
+        record["mean_abs_act_kor_per_layer"] = kor.mean(dim=1).tolist()
+        record["mean_abs_act_eng_per_layer"] = eng.mean(dim=1).tolist()
+    elif noise_target == "neuron_rand":
+        generator = torch.Generator().manual_seed(seed)
+        chosen = torch.randperm(total, generator=generator)[:k]
+    else:
+        raise ValueError(noise_target)
+    flat = torch.zeros(total, dtype=torch.bool)
+    flat[chosen] = True
+    masks = list(flat.view(num_layers, width))
+    record["per_layer_counts"] = [int(m.sum()) for m in masks]
+    record["selected"] = [torch.nonzero(m).flatten().tolist() for m in masks]
+    return masks, record
+
+
+def do_corruption(model, noise_alpha, noise_beta = 0.1, seed = 42, neuron_masks=None):
     # Loop through all parameters and add random noise scaled by scale factor
     assert 0 <= noise_alpha <= 1
     assert 0 <= noise_beta <= 1
+
+    if neuron_masks is not None:
+        return do_targeted_corruption(model, noise_alpha, noise_beta, neuron_masks)
 
     for param in model.parameters():
         if param.requires_grad:
@@ -511,5 +637,39 @@ def do_corruption(model, noise_alpha, noise_beta = 0.1, seed = 42):
 
             param.data = (1 - noise_alpha) * param.data + noise_alpha * corruption
 
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model.to(device)
+
+@torch.no_grad()
+def do_targeted_corruption(model, noise_alpha, noise_beta, neuron_masks):
+    """AGI-2635: theta <- (1 - alpha) theta + alpha beta N on the selected MLP neurons only (gate_proj and up_proj
+    rows, down_proj columns); every other parameter is untouched. N is drawn exactly as do_corruption draws it: one
+    full-shape xavier_uniform tensor per 2-D parameter, in model.parameters() order, so the fan-in/fan-out are the
+    full matrix's and the global RNG ends where untargeted noise leaves it (same data order downstream)."""
+    targets = {}
+    for i, (gate, up, down) in enumerate(mlp_modules(model)):
+        rows = neuron_masks[i].to(gate.weight.device)
+        targets[id(gate.weight)] = (rows, 0)
+        targets[id(up.weight)] = (rows, 0)
+        targets[id(down.weight)] = (rows.to(down.weight.device), 1)
+    hit = 0
+    for param in model.parameters():
+        if not param.requires_grad:
+            continue
+        if len(param.data.shape) == 2:
+            noise = torch.nn.init.xavier_uniform_(torch.empty_like(param.data))
+        elif len(param.data.shape) == 1:
+            noise = None
+        else:
+            raise RuntimeError(f"Unsupported parameter shape: {param.data.shape}")
+        if id(param) not in targets:
+            continue
+        sel, dim = targets[id(param)]
+        hit += 1
+        if dim == 0:
+            param.data[sel] = (1 - noise_alpha) * param.data[sel] + noise_alpha * (noise_beta * noise[sel])
+        else:
+            param.data[:, sel] = (1 - noise_alpha) * param.data[:, sel] + noise_alpha * (noise_beta * noise[:, sel])
+    assert hit == 3 * len(neuron_masks), f"noised {hit} MLP matrices, expected {3 * len(neuron_masks)}"
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model.to(device)
