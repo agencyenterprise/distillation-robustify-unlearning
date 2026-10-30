@@ -262,7 +262,8 @@ def agi2569_models(args):
                                                                    kor_targets, args.teacher_lr, args.epochs,
                                                                    args.stop_rule, args.warmup_frac,
                                                                    args.noise_target, args.noise_frac,
-                                                                   args.saliency_seqs))
+                                                                   args.saliency_seqs, args.noise_count,
+                                                                   args.p_kor_min, args.p_eng_max))
     return models
 
 if __name__ == "__main__":
@@ -284,9 +285,12 @@ if __name__ == "__main__":
                         help="Partial models of --stop_modes fixed_steps trained with this --warmup_frac (the "
                              "'-warmup_frac_<f>' runs)")
     parser.add_argument('--noise_target', choices=NOISE_TARGETS, default='all',
-                        help="Partial models trained with this --noise_target (neuron_act/neuron_rand: the "
-                             "'-nt_*' runs)")
+                        help="Partial models trained with this --noise_target (neuron_act/neuron_rand/neuron_rule: "
+                             "the '-nt_*' runs)")
     parser.add_argument('--noise_frac', type=float, default=None, help='... and this --noise_frac')
+    parser.add_argument('--noise_count', type=int, default=None, help='... or this --noise_count (neuron_rand)')
+    parser.add_argument('--p_kor_min', type=float, default=None, help='... or these --p_kor_min ...')
+    parser.add_argument('--p_eng_max', type=float, default=None, help='... and --p_eng_max (neuron_rule)')
     parser.add_argument('--saliency_seqs', type=int, default=SALIENCY_SEQS, help='... and this --saliency_seqs')
     parser.add_argument('--epochs', type=int, default=EPOCHS, help='Partial models of --stop_modes epoch (their epochs) or early (their cap on passes; default 1)')
     parser.add_argument('--teacher_lr', type=float, default=TEACHER_LR,

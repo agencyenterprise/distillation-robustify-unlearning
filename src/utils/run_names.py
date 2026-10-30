@@ -50,10 +50,11 @@ STOP_MODES = ['fixed_steps', 'early', 'epoch']
 # rank's own validation shard is within the threshold). Only 'any_shard' adds to the name, so pooled names are unchanged.
 STOP_RULES = ['pooled', 'any_shard']
 # What the one-time noise hits (AGI-2635): 'all' (upstream: every 2-D parameter), or a fraction of the MLP neurons,
-# chosen by forget/retain activation saliency ('neuron_act') or uniformly at random ('neuron_rand', its control).
+# chosen by forget/retain activation saliency ('neuron_act') or uniformly at random ('neuron_rand', its control), or
+# every MLP neuron passing a firing-probability rule ('neuron_rule': P_kor >= q and P_eng <= r).
 # Only the targeted modes add to the name, so 'all' names are unchanged.
-NOISE_TARGETS = ['all', 'neuron_act', 'neuron_rand']
-SALIENCY_SEQS = 64        # neuron_act: Korean and English train sequences each used to score neurons
+NOISE_TARGETS = ['all', 'neuron_act', 'neuron_rand', 'neuron_rule']
+SALIENCY_SEQS = 64        # neuron_act / neuron_rule: Korean and English train sequences each used to score neurons
 
 SWEEP_ALPHAS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
 SWEEP_BETAS = [0.1]
@@ -88,18 +89,39 @@ def warmup_suffix(warmup_frac=None):
     return "" if warmup_frac is None else f"-warmup_frac_{fmt(warmup_frac)}"
 
 
-def noise_suffix(noise_target='all', noise_frac=None, saliency_seqs=SALIENCY_SEQS):
-    """'' for 'all'; '-nt_act_f<frac>' / '-nt_rand_f<frac>' for targeted noise, plus '_s<n>' when neuron_act scores
-    neurons on a non-default number of sequences."""
+def noise_suffix(noise_target='all', noise_frac=None, saliency_seqs=SALIENCY_SEQS, noise_count=None, p_kor_min=None,
+                 p_eng_max=None):
+    """'' for 'all'. Targeted noise:
+      neuron_act   '-nt_act_f<frac>'
+      neuron_rand  '-nt_rand_f<frac>', or '-nt_rand_n<count>' with noise_count (exactly one of the two)
+      neuron_rule  '-nt_rule_q<p_kor_min>_r<p_eng_max>'
+    plus '_s<n>' when neuron_act / neuron_rule score neurons on a non-default number of sequences."""
     if noise_target not in NOISE_TARGETS:
         raise ValueError(f"unknown noise_target {noise_target!r}")
     if noise_target == 'all':
-        if noise_frac is not None:
-            raise ValueError("noise_frac applies only to targeted noise (neuron_act, neuron_rand)")
+        if noise_frac is not None or noise_count is not None or p_kor_min is not None or p_eng_max is not None:
+            raise ValueError("noise_frac / noise_count / p_kor_min / p_eng_max apply only to targeted noise")
         return ""
+    if noise_target != 'neuron_rule' and (p_kor_min is not None or p_eng_max is not None):
+        raise ValueError("p_kor_min / p_eng_max apply only to noise_target 'neuron_rule'")
+    if noise_target != 'neuron_rand' and noise_count is not None:
+        raise ValueError("noise_count applies only to noise_target 'neuron_rand'")
+    seqs = (f"_s{saliency_seqs}" if noise_target in ('neuron_act', 'neuron_rule') and saliency_seqs != SALIENCY_SEQS
+            else "")
+    if noise_target == 'neuron_rule':
+        if noise_frac is not None:
+            raise ValueError("neuron_rule selects by threshold: no noise_frac")
+        if p_kor_min is None or p_eng_max is None or not (0 <= p_kor_min <= 1 and 0 <= p_eng_max <= 1):
+            raise ValueError(f"neuron_rule needs 0 <= p_kor_min, p_eng_max <= 1, got {p_kor_min!r}, {p_eng_max!r}")
+        return f"-nt_rule_q{fmt(p_kor_min)}_r{fmt(p_eng_max)}{seqs}"
+    if noise_count is not None:
+        if noise_frac is not None:
+            raise ValueError("neuron_rand takes noise_frac or noise_count, not both")
+        if int(noise_count) != noise_count or noise_count < 1:
+            raise ValueError(f"noise_count must be a positive integer, got {noise_count!r}")
+        return f"-nt_rand_n{int(noise_count)}"
     if noise_frac is None or not 0 < noise_frac <= 1:
         raise ValueError(f"noise_target {noise_target!r} needs 0 < noise_frac <= 1, got {noise_frac!r}")
-    seqs = f"_s{saliency_seqs}" if noise_target == 'neuron_act' and saliency_seqs != SALIENCY_SEQS else ""
     return f"-nt_{noise_target.split('_')[1]}_f{fmt(noise_frac)}{seqs}"
 
 
@@ -115,7 +137,8 @@ def fmt(x):
 
 def partial_distill_name(arm, alpha, beta, seed, stop_mode='fixed_steps', fixed_steps=FIXED_STEPS, kor_targets='uniform',
                          teacher_lr=TEACHER_LR, epochs=EPOCHS, stop_rule='pooled', warmup_frac=None,
-                         noise_target='all', noise_frac=None, saliency_seqs=SALIENCY_SEQS):
+                         noise_target='all', noise_frac=None, saliency_seqs=SALIENCY_SEQS, noise_count=None,
+                         p_kor_min=None, p_eng_max=None):
     if stop_rule != 'pooled' and stop_mode != 'early':
         raise ValueError(f"stop_rule {stop_rule!r} applies only to stop_mode 'early'")
     if warmup_frac is not None and stop_mode != 'fixed_steps':
@@ -123,7 +146,8 @@ def partial_distill_name(arm, alpha, beta, seed, stop_mode='fixed_steps', fixed_
     return (f"partial_distill_models/gemma-2-0.1B-language-partial_distill-teacher_lr_{lr_tag(teacher_lr)}"
             f"-arm_{arm_label(arm, kor_targets)}"
             f"-alpha_{fmt(alpha)}-beta_{fmt(beta)}-seed_{seed}-{stop_label(stop_mode, fixed_steps, epochs)}"
-            f"{stop_rule_suffix(stop_rule)}{warmup_suffix(warmup_frac)}{noise_suffix(noise_target, noise_frac, saliency_seqs)}")
+            f"{stop_rule_suffix(stop_rule)}{warmup_suffix(warmup_frac)}"
+            f"{noise_suffix(noise_target, noise_frac, saliency_seqs, noise_count, p_kor_min, p_eng_max)}")
 
 
 def relearn_record_dir(model):

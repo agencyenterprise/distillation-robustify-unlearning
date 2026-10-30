@@ -56,8 +56,10 @@ PARTIAL_RE = re.compile(
     r"-alpha_(?P<alpha>[\d.]+)-beta_(?P<beta>[\d.]+)-seed_(?P<seed>\d+)-(?P<stop>fixed_steps_\d+|early_stop_epochs_\d+|early_stop|epochs_\d+)"
     r"(?P<stop_rule>-stop_any_shard)?"   # --stop_rule any_shard runs (pooled runs have no suffix)
     r"(?:-warmup_frac_(?P<warmup_frac>[\d.]+))?"   # --warmup_frac runs (the setup's warmup: no suffix)
-    # --noise_target neuron_act / neuron_rand runs (noise on every 2-D parameter, 'all': no suffix)
-    r"(?:-nt_(?P<noise_target>act|rand)_f(?P<noise_frac>[\d.]+)(?:_s(?P<saliency_seqs>\d+))?)?$"
+    # --noise_target runs (noise on every 2-D parameter, 'all': no suffix): neuron_act / neuron_rand by fraction
+    # ('-nt_act_f0.05'), neuron_rand by count ('-nt_rand_n9'), neuron_rule by thresholds ('-nt_rule_q0.2_r0.02')
+    r"(?:-nt_(?P<noise_target>act|rand|rule)_(?:f(?P<noise_frac>[\d.]+)|n(?P<noise_count>\d+)"
+    r"|q(?P<p_kor_min>[\d.e-]+)_r(?P<p_eng_max>[\d.e-]+?))(?:_s(?P<saliency_seqs>\d+))?)?$"
 )
 RECORD_RE = re.compile(r"^(?P<lr>[^_]+)(?:_eval_every_(?P<eval_every>\d+))?_only_forget_data\.txt$")
 ATTACK_LRS = (1e-3, 7e-4, 4e-4, 1e-4, 7e-5, 5e-5, 1e-5, 7e-6, 4e-6, 1e-6)  # run_relearn_language.py LRS_TO_RUN

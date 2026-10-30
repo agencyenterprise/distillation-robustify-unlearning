@@ -114,6 +114,28 @@ def main():
             selection = json.load(f)
         assert selection["k"] == round(0.05 * selection["total_neurons"]) == sum(selection["per_layer_counts"])
         print(f"[smoke] arm F {target} OK: k={selection['k']}, {selection.get('score_summary')}")
+    # neuron_rule and neuron_rand by count; --dry_select picks the same neurons as the run (and writes no run).
+    for kw in (dict(noise_target="neuron_rule", p_kor_min=0.3, p_eng_max=0.7, saliency_seqs=4),
+               dict(noise_target="neuron_rand", noise_count=5)):
+        pd.run_experiment("gemma-2-0.1B_MaxEnt", 1.0, 1.0, 111, "F", "uniform", "early", max_steps=2, **kw)
+        name = partial_distill_name("F", 1.0, 1.0, 111, "early", **kw)
+        assert os.path.exists(f"{MODEL_DIR}/{name}/final_model/config.json"), name
+        with open(f"{MODEL_DIR}/local_records/{name}_noise_selection.json") as f:
+            selection = json.load(f)
+        assert selection["k"] == sum(selection["per_layer_counts"]) > 0
+        if "noise_count" in kw:
+            assert selection["k"] == 5
+        else:
+            assert min(min(v, default=1) for v in selection["p_kor_selected"]) >= 0.3
+            assert max(max(v, default=0) for v in selection["p_eng_selected"]) <= 0.7
+        dry_args = argparse.Namespace(**{**dict(
+            setup="gemma-2-0.1B_MaxEnt", arm="F", seed=111, teacher_lr=TEACHER_LR, alpha=None, beta=None,
+            stop_mode="early", fixed_steps=500, kor_targets="uniform", epochs=1, stop_rule="pooled", warmup_frac=None,
+            noise_frac=None, noise_count=None, p_kor_min=None, p_eng_max=None, saliency_seqs=64,
+            dry_select_out=f"{WORK}/dry_select.json"), **kw})
+        dry = pd.dry_select(dry_args)
+        assert dry["selected"] == selection["selected"] and dry["k"] == selection["k"], (dry, selection)
+        print(f"[smoke] arm F {name.rsplit('-', 1)[-1]} OK: k={selection['k']}, dry_select agrees")
     # Rerun is a no-op.
     pd.run_experiment("gemma-2-0.1B_MaxEnt", 0.3, 0.1, 111, "A", "uniform", "fixed_steps", fixed_steps=3)
 

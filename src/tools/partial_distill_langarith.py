@@ -101,6 +101,9 @@ def partial_distill(
     saliency_seqs=64,
     saliency_files=None,
     noise_record_paths=(),
+    noise_count=None,
+    p_kor_min=None,
+    p_eng_max=None,
 ):
     """
     Distillation script using Accelerate. Replaces standard CE with forward KL (KL(teacher||student)).
@@ -132,7 +135,11 @@ def partial_distill(
                                 only round(noise_frac x all MLP neurons) neurons (gate/up_proj rows and the
                                 down_proj column), chosen by Korean/English activation saliency or at random
                                 (select_mlp_neurons). Everything is then retrained as usual.
-      saliency_seqs, saliency_files  neuron_act: score on this many sequences each of (forget, retain) train files.
+      noise_count               neuron_rand: noise exactly this many neurons instead of round(noise_frac x all).
+      p_kor_min, p_eng_max      "neuron_rule": noise every neuron with firing probability >= p_kor_min on the forget
+                                and <= p_eng_max on the retain train sequences (select_mlp_neurons).
+      saliency_seqs, saliency_files  neuron_act / neuron_rule: score on this many sequences each of (forget, retain)
+                                train files.
       noise_record_paths        targeted modes: where to write the selection JSON (noise_selection_record).
     """
     assert loss_type in ("kl", "ce"), loss_type
@@ -200,16 +207,18 @@ def partial_distill(
     neuron_masks = None
     if noise_target != "all":
         saliency_ds = None
-        if noise_target == "neuron_act":
+        if noise_target in ("neuron_act", "neuron_rule"):
             with accelerator.main_process_first():
                 saliency_ds = [load_train_dataset([f], tokenizer, max_length, join_or_subsequence, [1.0], seed,
                                                   stopping_strategy, dataset_cache_dir, print_message)
                                for f in saliency_files]
         neuron_masks, selection = select_mlp_neurons(
             student_model, noise_target, noise_frac, seed, accelerator, saliency_ds=saliency_ds,
-            saliency_seqs=saliency_seqs, batch_size=batch_size, tokenizer=tokenizer, max_length=max_length)
+            saliency_seqs=saliency_seqs, batch_size=batch_size, tokenizer=tokenizer, max_length=max_length,
+            noise_count=noise_count, p_kor_min=p_kor_min, p_eng_max=p_eng_max)
         if accelerator.is_main_process:
-            selection.update(noise_target=noise_target, noise_frac=noise_frac, noise_alpha=noise_alpha,
+            selection.update(noise_target=noise_target, noise_frac=noise_frac, noise_count=noise_count,
+                             noise_alpha=noise_alpha,
                              noise_beta=noise_beta, seed=seed, saliency_seqs=saliency_seqs,
                              saliency_files=list(saliency_files) if saliency_files else None,
                              student_model_name=student_model_name)
@@ -571,23 +580,135 @@ def neuron_saliency(model, datasets, n_seqs, batch_size, tokenizer, max_length, 
     return out
 
 
+# Per-neuron stats: mean |h| and mean h (h = input to down_proj) and p_fire = fraction of tokens with
+# act_fn(gate_proj x) > 0. Shared by run_neuron_stats_language.py and --noise_target neuron_rule.
+NEURON_STATS = ("mean_abs", "mean", "p_fire")
+
+
+@torch.no_grad()
+def neuron_stats(model, ds, n_seqs, batch_size, tokenizer, max_length, device, ratio_seqs=64):
+    """Per-neuron stats (run_neuron_stats_language.py; neuron_rule's p_fire) on the first n_seqs rows of ds, for splits 'all', 'h0', 'h1' and f'first{ratio_seqs}'.
+    Returns {split: {stat: [num_layers, width] float64 ndarray}} and {split: n_tokens}."""
+    assert len(ds) >= n_seqs >= 2, f"need {n_seqs} sequences, the dataset has {len(ds)}"
+    half = n_seqs // 2
+    mlps = mlp_modules(model)
+    layers = getattr(model, "module", model).model.layers
+    num_layers, width = len(mlps), mlps[0][2].in_features
+    collator = DataCollatorWithPadding(tokenizer=tokenizer, padding="max_length", max_length=max_length)
+    was_training = model.training
+    model.eval()
+    model.to(device)
+    # acc[split_index][stat]; split 0 = h0, 1 = h1, 2 = first ratio_seqs (a subset of h0/h1, accumulated alongside)
+    acc = [{s: torch.zeros(num_layers, width, dtype=torch.float64, device=device) for s in NEURON_STATS} for _ in range(3)]
+    tokens = [0.0, 0.0, 0.0]
+    state = {}
+
+    def down_hook(i):
+        def fn(module, args):
+            h, m = args[0].double(), state["mask"][..., None]
+            for k in state["targets"]:
+                acc[k]["mean_abs"][i] += (h.abs() * m).sum(dim=(0, 1))
+                acc[k]["mean"][i] += (h * m).sum(dim=(0, 1))
+        return fn
+
+    def gate_hook(i):
+        act_fn = layers[i].mlp.act_fn
+        def fn(module, args, output):
+            fire = (act_fn(output) > 0).double() * state["mask"][..., None]
+            for k in state["targets"]:
+                acc[k]["p_fire"][i] += fire.sum(dim=(0, 1))
+        return fn
+
+    handles = [down.register_forward_pre_hook(down_hook(i)) for i, (_, _, down) in enumerate(mlps)]
+    handles += [gate.register_forward_hook(gate_hook(i)) for i, (gate, _, _) in enumerate(mlps)]
+    try:
+        # Batches never straddle a split boundary (half, ratio_seqs), so each batch has one set of targets.
+        bounds = sorted({0, half, n_seqs, *( [ratio_seqs] if 0 < ratio_seqs < n_seqs else [] )})
+        for lo, hi in zip(bounds[:-1], bounds[1:]):
+            for start in range(lo, hi, batch_size):
+                end = min(start + batch_size, hi)
+                rows = ds.select(range(start, end))
+                batch = collator([{"input_ids": r["input_ids"], "attention_mask": r["attention_mask"]} for r in rows])
+                mask = batch["attention_mask"].to(device)
+                state["mask"] = mask.double()
+                state["targets"] = [0 if start < half else 1] + ([2] if start < ratio_seqs else [])
+                n = mask.sum().item()
+                for k in state["targets"]:
+                    tokens[k] += n
+                model.model(input_ids=batch["input_ids"].to(device), attention_mask=mask)
+    finally:
+        for h in handles:
+            h.remove()
+    out, n_tokens = {}, {}
+    names = ["h0", "h1", f"first{ratio_seqs}"]
+    model.train(was_training)
+    for k, name in enumerate(names):
+        if tokens[k]:
+            out[name] = {s: (acc[k][s] / tokens[k]).cpu().numpy() for s in NEURON_STATS}
+            n_tokens[name] = int(tokens[k])
+    tot = tokens[0] + tokens[1]
+    out["all"] = {s: ((acc[0][s] + acc[1][s]) / tot).cpu().numpy() for s in NEURON_STATS}
+    n_tokens["all"] = int(tot)
+    return out, n_tokens
+
+
 def select_mlp_neurons(model, noise_target, noise_frac, seed, accelerator=None, saliency_ds=None, saliency_seqs=64,
-                       batch_size=4, tokenizer=None, max_length=None, eps=1e-6):
-    """Pick k = round(noise_frac x all MLP neurons) neurons across all layers.
-      neuron_act   global top-k of mean|act| on forget (saliency_ds[0]) / (mean|act| on retain (saliency_ds[1]) + eps)
-      neuron_rand  k uniformly at random, from a torch.Generator seeded with `seed` (the global RNG is not used)
+                       batch_size=4, tokenizer=None, max_length=None, eps=1e-6, noise_count=None, p_kor_min=None,
+                       p_eng_max=None, device=None):
+    """Pick MLP neurons across all layers to noise.
+      neuron_act   k = round(noise_frac x all MLP neurons): global top-k of mean|act| on forget (saliency_ds[0]) /
+                   (mean|act| on retain (saliency_ds[1]) + eps)
+      neuron_rand  k = round(noise_frac x all) or exactly noise_count (one of the two), uniformly at random, from a
+                   torch.Generator seeded with `seed` (the global RNG is not used)
+      neuron_rule  every neuron with p_fire(forget) >= p_kor_min and p_fire(retain) <= p_eng_max, p_fire as
+                   run_neuron_stats_language.py computes it (neuron_stats, split 'all') on saliency_seqs sequences each;
+                   k is however many pass
+    Scores are computed on `device` (default: the accelerator's, else CPU); with several processes rank 0's are
+    broadcast, so every rank selects the same neurons.
     Returns ([num_layers] bool masks over each layer's neurons, a JSON-able record of the selection)."""
     mlps = mlp_modules(model)
     num_layers, width = len(mlps), mlps[0][2].in_features
     total = num_layers * width
-    k = round(noise_frac * total)
-    assert 0 < k <= total, (noise_frac, total)
-    record = {"num_layers": num_layers, "intermediate_size": width, "total_neurons": total, "k": k}
-    if noise_target == "neuron_act":
+    if device is None:
         device = accelerator.device if accelerator is not None else torch.device("cpu")
+    multi = accelerator is not None and accelerator.num_processes > 1
+    if noise_target == "neuron_rule":
+        assert noise_frac is None and noise_count is None, "neuron_rule selects by threshold, not by size"
+        assert p_kor_min is not None and p_eng_max is not None, "neuron_rule needs p_kor_min and p_eng_max"
+        k = None
+    elif noise_target == "neuron_rand" and noise_count is not None:
+        assert noise_frac is None, "neuron_rand takes noise_frac or noise_count, not both"
+        k = int(noise_count)
+    else:
+        assert noise_count is None, "noise_count applies only to neuron_rand"
+        k = round(noise_frac * total)
+    assert k is None or 0 < k <= total, (noise_frac, noise_count, total)
+    record = {"num_layers": num_layers, "intermediate_size": width, "total_neurons": total, "k": k}
+    if noise_target == "neuron_rule":
+        p_fire, n_tokens = [], []
+        for ds in saliency_ds:
+            stats, n_tok = neuron_stats(model, ds, saliency_seqs, batch_size, tokenizer, max_length, device,
+                                        ratio_seqs=0)
+            p_fire.append(torch.from_numpy(stats["all"]["p_fire"]))
+            n_tokens.append(n_tok["all"])
+        p = torch.stack(p_fire)   # [2, num_layers, width] float64: forget, retain
+        if multi:
+            from accelerate.utils import broadcast
+            p = broadcast(p.to(accelerator.device), from_process=0).cpu()
+        p_kor, p_eng = p[0].flatten(), p[1].flatten()
+        chosen = torch.nonzero((p_kor >= p_kor_min) & (p_eng <= p_eng_max)).flatten()
+        k = record["k"] = len(chosen)
+        assert k > 0, f"no neuron has p_fire(kor) >= {p_kor_min} and p_fire(eng) <= {p_eng_max}"
+        record.update(p_kor_min=p_kor_min, p_eng_max=p_eng_max, n_tokens_kor=n_tokens[0], n_tokens_eng=n_tokens[1],
+                      p_fire_kor_mean_per_layer=p[0].mean(dim=1).tolist(),
+                      p_fire_eng_mean_per_layer=p[1].mean(dim=1).tolist())
+    elif noise_target == "neuron_rand":
+        generator = torch.Generator().manual_seed(seed)
+        chosen = torch.randperm(total, generator=generator)[:k]
+    elif noise_target == "neuron_act":
         kor, eng = neuron_saliency(model, saliency_ds, saliency_seqs, batch_size, tokenizer, max_length, device)
         scores = (kor / (eng + eps)).flatten()
-        if accelerator is not None and accelerator.num_processes > 1:
+        if multi:
             from accelerate.utils import broadcast
             scores = broadcast(scores.to(accelerator.device), from_process=0).cpu()
         chosen = torch.topk(scores, k).indices
@@ -599,9 +720,6 @@ def select_mlp_neurons(model, noise_target, noise_frac, seed, accelerator=None, 
             "selected_median_over_median_all": scores[chosen].median().item() / median}
         record["mean_abs_act_kor_per_layer"] = kor.mean(dim=1).tolist()
         record["mean_abs_act_eng_per_layer"] = eng.mean(dim=1).tolist()
-    elif noise_target == "neuron_rand":
-        generator = torch.Generator().manual_seed(seed)
-        chosen = torch.randperm(total, generator=generator)[:k]
     else:
         raise ValueError(noise_target)
     flat = torch.zeros(total, dtype=torch.bool)
@@ -609,6 +727,9 @@ def select_mlp_neurons(model, noise_target, noise_frac, seed, accelerator=None, 
     masks = list(flat.view(num_layers, width))
     record["per_layer_counts"] = [int(m.sum()) for m in masks]
     record["selected"] = [torch.nonzero(m).flatten().tolist() for m in masks]
+    if noise_target == "neuron_rule":   # aligned with record["selected"]
+        record["p_kor_selected"] = [p[0][i][m].tolist() for i, m in enumerate(masks)]
+        record["p_eng_selected"] = [p[1][i][m].tolist() for i, m in enumerate(masks)]
     return masks, record
 
 

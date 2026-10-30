@@ -29,6 +29,10 @@ round(--noise_frac x all MLP neurons) neurons (gate/up_proj rows, down_proj colu
 input| on Korean / English train sequences (--saliency_seqs of each, from the student before noising) or a random
 set (seeded by --seed); the whole model is then retrained as usual. Runs get a '-nt_act_f<f>' / '-nt_rand_f<f>'
 name suffix, and the selection is written next to the run's record as <record>_noise_selection.json.
+'neuron_rand' with --noise_count N instead of --noise_frac noises exactly N random neurons ('-nt_rand_n<N>'; size-matched
+controls). 'neuron_rule' noises every neuron with firing probability P_kor >= --p_kor_min and P_eng <= --p_eng_max on
+--saliency_seqs Korean / English train sequences (p_fire as run_neuron_stats_language.py; '-nt_rule_q<q>_r<r>').
+--dry_select: only that selection (single-experiment flags; no training, nothing written), printing its size.
 
 GPUs: the paper ran every language UNDO run on 4 H200s (arXiv 2506.06278, App. E): per-process batch 4 x 60
 accumulation, so 960 sequences per optimizer step. --gpus_per_run 4 reproduces this; the step and schedule
@@ -38,27 +42,29 @@ Launch Command (Single):     accelerate launch --multi_gpu --num_processes 4 run
 Launch Command (Sweep):      python run_partial_distill_language.py --run_all --gpus_per_run 4 --arms A --alphas 0.1 0.2
 """
 
-from src.tools.partial_distill_langarith import load_tokenizer, load_train_dataset, partial_distill
+from src.tools.partial_distill_langarith import load_tokenizer, load_train_dataset, partial_distill, select_mlp_neurons
 from src.utils.paths import CACHE_DIR, DATASET_DIR, MODEL_DIR, USE_WANDB, WANDB_API_KEY
 from src.utils.run_names import (
     ARMS, EPOCHS, KOR_TARGETS, NOISE_TARGETS, SALIENCY_SEQS, STOP_MODES, STOP_RULES, SWEEP_ALPHAS, SWEEP_BETAS, SWEEP_SEEDS, FIXED_STEPS, TEACHER_LR,
-    partial_distill_name, reference_models, warmup_optimizer_steps,
+    noise_suffix, partial_distill_name, reference_models, warmup_optimizer_steps,
 )
 from accelerate import Accelerator
 from utils.loss_functions import print_acc, custom_login
 from src.utils.validation_functions import get_korean_and_english_evalaution_fn
 from utils.parallel_launch import launch_in_parallel_accelerate_groups
 import argparse
+import json
 import os
 import subprocess
 import sys
 import time
 from datetime import datetime
 
+import torch
+
 # MATMUL_PRECISION (env): torch.set_float32_matmul_precision for fp32 runs. Unset keeps PyTorch's "highest" (no TF32),
 # which is what upstream's distillation ran without mixed precision; "high" allows TF32. Only fp32 matmuls are affected.
 if os.environ.get("MATMUL_PRECISION"):
-    import torch
     torch.set_float32_matmul_precision(os.environ["MATMUL_PRECISION"])
 
 # Configuration constants
@@ -184,7 +190,8 @@ def never_stop_cond_fn(student_eval_dict, teacher_eval_dict):
 
 def run_experiment(setup_id, alpha, beta, seed=None, arm='A', kor_targets='uniform', stop_mode='fixed_steps',
                    fixed_steps=FIXED_STEPS, max_steps=None, teacher_lr=TEACHER_LR, epochs=EPOCHS, stop_rule='pooled',
-                   warmup_frac=None, noise_target='all', noise_frac=None, saliency_seqs=SALIENCY_SEQS):
+                   warmup_frac=None, noise_target='all', noise_frac=None, saliency_seqs=SALIENCY_SEQS,
+                   noise_count=None, p_kor_min=None, p_eng_max=None):
     """Run a single experiment. max_steps caps early-stop runs (default: none, as upstream)."""
     current_setup = setups[setup_id].copy()
     arm_config = ARM_CONFIGS[arm]
@@ -195,7 +202,7 @@ def run_experiment(setup_id, alpha, beta, seed=None, arm='A', kor_targets='unifo
 
     model_name = partial_distill_name(arm, alpha, beta, current_setup['seed'], stop_mode, fixed_steps, kor_targets,
                                       teacher_lr, epochs, stop_rule, warmup_frac, noise_target, noise_frac,
-                                      saliency_seqs)
+                                      saliency_seqs, noise_count, p_kor_min, p_eng_max)
     current_setup['output_dir'] = current_setup['output_dir'].replace('model_name', model_name)
     current_setup['path_local_record'] = current_setup['path_local_record'].replace('model_name', model_name)
     current_setup['teacher_model_name'] = model_path('unlearn', teacher_lr)
@@ -298,6 +305,9 @@ def run_experiment(setup_id, alpha, beta, seed=None, arm='A', kor_targets='unifo
         warmup_optimizer_steps=None if warmup_frac is None else warmup_optimizer_steps(warmup_frac, fixed_steps),
         noise_target=noise_target,
         noise_frac=noise_frac,
+        noise_count=noise_count,
+        p_kor_min=p_kor_min,
+        p_eng_max=p_eng_max,
         saliency_seqs=saliency_seqs,
         # Forget, retain: train files (valid_kor is the relearn attack's eval set), loaded here for every arm.
         saliency_files=(KOR_TRAIN_FILE, ENG_TRAIN_FILE),
@@ -325,7 +335,7 @@ def warm_cache(args):
         batch_size=current_setup['batch_size'], accelerator=accelerator)
     tokenizer = load_tokenizer(teacher, current_setup['cache_dir'])
     domain_sets = {(tuple(ARM_CONFIGS[arm]['domains']), seed) for arm in args.arms for seed in args.seeds}
-    if getattr(args, 'noise_target', 'all') == 'neuron_act':  # saliency reads each train file on its own (seed unused for one file)
+    if getattr(args, 'noise_target', 'all') in ('neuron_act', 'neuron_rule'):  # saliency reads each train file on its own (seed unused for one file)
         domain_sets |= {(('kor',), seed) for seed in args.seeds} | {(('eng',), seed) for seed in args.seeds}
     for domains, seed in sorted(domain_sets):
         train_ds = load_train_dataset([TRAIN_FILES[d] for d in domains], tokenizer, current_setup['max_length'], True,
@@ -337,7 +347,7 @@ def warm_cache(args):
 
 def experiment_cli_args(experiment):
     (setup_id, alpha, beta, seed, arm, kor_targets, stop_mode, fixed_steps, max_steps, teacher_lr, epochs, stop_rule,
-     warmup_frac, noise_target, noise_frac, saliency_seqs) = experiment
+     warmup_frac, noise_target, noise_frac, saliency_seqs, noise_count, p_kor_min, p_eng_max) = experiment
     cmd = ["--setup", setup_id, "--alpha", str(alpha), "--beta", str(beta), "--seed", str(seed), "--arm", arm,
            "--kor_targets", kor_targets, "--stop_mode", stop_mode, "--fixed_steps", str(fixed_steps),
            "--teacher_lr", str(teacher_lr), "--epochs", str(epochs), "--stop_rule", stop_rule]
@@ -346,8 +356,11 @@ def experiment_cli_args(experiment):
     if warmup_frac is not None:
         cmd.extend(["--warmup_frac", str(warmup_frac)])
     if noise_target != 'all':
-        cmd.extend(["--noise_target", noise_target, "--noise_frac", str(noise_frac),
-                    "--saliency_seqs", str(saliency_seqs)])
+        cmd.extend(["--noise_target", noise_target, "--saliency_seqs", str(saliency_seqs)])
+        for flag, value in (("--noise_frac", noise_frac), ("--noise_count", noise_count),
+                            ("--p_kor_min", p_kor_min), ("--p_eng_max", p_eng_max)):
+            if value is not None:
+                cmd.extend([flag, str(value)])
     return cmd
 
 def launch_single_experiment(experiment):
@@ -376,12 +389,46 @@ def launch_single_experiment(experiment):
         print(f"{'='*80}\n")
         return False
 
+def dry_select(args):
+    """--dry_select: the targeted-noise selection run_experiment would make for the single-experiment flags (--arm's
+    student, --seed, --noise_* flags), on one process (CUDA if available), with the same tokenizer, train files,
+    packing, batch size and model loading as partial_distill. Prints the selection's size; trains and writes nothing
+    unless --dry_select_out is given (the selection JSON)."""
+    from transformers import AutoModelForCausalLM
+    setup = setups[args.setup]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    teacher = model_path('unlearn', args.teacher_lr)
+    student = model_path(ARM_CONFIGS[args.arm]['student'], args.teacher_lr)
+    tokenizer = load_tokenizer(teacher, setup['cache_dir'])
+    model = AutoModelForCausalLM.from_pretrained(student, cache_dir=setup['cache_dir'], attn_implementation='eager')
+    saliency_ds = None
+    if args.noise_target in ('neuron_act', 'neuron_rule'):
+        saliency_ds = [load_train_dataset([f], tokenizer, setup['max_length'], True, [1.0], args.seed, 'first_exhausted',
+                                          setup['dataset_cache_dir']) for f in (KOR_TRAIN_FILE, ENG_TRAIN_FILE)]
+    _, record = select_mlp_neurons(
+        model, args.noise_target, args.noise_frac, args.seed, saliency_ds=saliency_ds, saliency_seqs=args.saliency_seqs,
+        batch_size=setup['batch_size'], tokenizer=tokenizer, max_length=setup['max_length'],
+        noise_count=args.noise_count, p_kor_min=args.p_kor_min, p_eng_max=args.p_eng_max, device=device)
+    record.update(noise_target=args.noise_target, seed=args.seed, saliency_seqs=args.saliency_seqs, student=student,
+                  tokenizer=teacher, device=str(device), matmul_precision=torch.get_float32_matmul_precision())
+    print(f"[dry_select] student {student} on {device}, matmul {torch.get_float32_matmul_precision()}")
+    suffix = noise_suffix(args.noise_target, args.noise_frac, args.saliency_seqs, args.noise_count, args.p_kor_min,
+                          args.p_eng_max)
+    print(f"[dry_select] {suffix}, seed {args.seed}")
+    print(f"[dry_select] per layer {record['per_layer_counts']}")
+    print(f"[dry_select] SELECTED {record['k']} of {record['total_neurons']} MLP neurons")
+    if args.dry_select_out:
+        os.makedirs(os.path.dirname(os.path.abspath(args.dry_select_out)), exist_ok=True)
+        with open(args.dry_select_out, "w", encoding="utf-8") as f:
+            json.dump(record, f)
+    return record
+
 def run_all_experiments(args):
     """Run all experiments in the sweep, optionally starting from a specific alpha"""
     alphas = [a for a in args.alphas if args.start_alpha is None or a >= args.start_alpha]
     experiments = [(setup_id, alpha, beta, seed, arm, args.kor_targets, args.stop_mode, args.fixed_steps, args.max_steps,
                     args.teacher_lr, args.epochs, args.stop_rule, args.warmup_frac, args.noise_target,
-                    args.noise_frac, args.saliency_seqs)
+                    args.noise_frac, args.saliency_seqs, args.noise_count, args.p_kor_min, args.p_eng_max)
                    for setup_id in SETUPS_TO_RUN
                    for arm in args.arms
                    for alpha in alphas
@@ -452,9 +499,20 @@ if __name__ == "__main__":
                              "'-nt_act_f<f>' / '-nt_rand_f<f>' to the run name")
     parser.add_argument('--noise_frac', type=float, default=None,
                         help='targeted noise: fraction of all MLP neurons (all layers) to noise, e.g. 0.05')
+    parser.add_argument('--noise_count', type=int, default=None,
+                        help="neuron_rand: noise exactly this many random neurons instead of --noise_frac (one of the "
+                             "two); adds '-nt_rand_n<N>' to the run name")
+    parser.add_argument('--p_kor_min', type=float, default=None,
+                        help='neuron_rule: noise every neuron firing on >= this fraction of Korean tokens ...')
+    parser.add_argument('--p_eng_max', type=float, default=None,
+                        help="... and on <= this fraction of English tokens; adds '-nt_rule_q<q>_r<r>' to the name")
     parser.add_argument('--saliency_seqs', type=int, default=SALIENCY_SEQS,
-                        help='neuron_act: Korean and English train sequences each to score neurons on (default 64; '
-                             "other values add '_s<n>' to the name)")
+                        help='neuron_act / neuron_rule: Korean and English train sequences each to score neurons on '
+                             "(default 64; other values add '_s<n>' to the name)")
+    parser.add_argument('--dry_select', action='store_true',
+                        help='Only compute and print the targeted-noise selection of the single-experiment flags '
+                             '(--arm, --seed, --noise_*), then exit: no training, nothing written')
+    parser.add_argument('--dry_select_out', default=None, help='--dry_select: also write the selection JSON here')
     parser.add_argument('--teacher_lr', type=float, default=TEACHER_LR,
                         help='MaxEnt teacher LR (default 8e-5, the paper\'s; upstream hard-coded 3e-5)')
     parser.add_argument('--epochs', type=int, default=EPOCHS, help='epoch mode: passes over the training data; early mode: the cap on passes (default 1)')
@@ -474,8 +532,17 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.warmup_frac is not None and args.stop_mode != 'fixed_steps':
         parser.error("--warmup_frac applies only to --stop_mode fixed_steps")
-    if (args.noise_target == 'all') != (args.noise_frac is None):
-        parser.error("--noise_frac is required with, and only with, --noise_target neuron_act / neuron_rand")
+    try:   # the name's rules: --noise_frac (act; rand), --noise_count (rand), --p_kor_min/--p_eng_max (rule), else none
+        noise_suffix(args.noise_target, args.noise_frac, args.saliency_seqs, args.noise_count, args.p_kor_min,
+                     args.p_eng_max)
+    except ValueError as e:
+        parser.error(f"targeted noise flags: {e}")
+
+    if args.dry_select:
+        if args.noise_target == 'all':
+            parser.error("--dry_select needs a targeted --noise_target")
+        dry_select(args)
+        raise SystemExit
 
     if args.warm_cache:
         warm_cache(args)
@@ -486,7 +553,8 @@ if __name__ == "__main__":
         print(f"Running single experiment: arm {args.arm}, alpha {args.alpha}, beta {args.beta}, seed {args.seed}, {args.stop_mode}")
         run_experiment(args.setup, args.alpha, args.beta, args.seed, args.arm, args.kor_targets,
                        args.stop_mode, args.fixed_steps, args.max_steps, args.teacher_lr, args.epochs, args.stop_rule,
-                       args.warmup_frac, args.noise_target, args.noise_frac, args.saliency_seqs)
+                       args.warmup_frac, args.noise_target, args.noise_frac, args.saliency_seqs, args.noise_count,
+                       args.p_kor_min, args.p_eng_max)
 
     # If run_all flag is set, run all experiments
     elif args.run_all or args.start_alpha is not None:

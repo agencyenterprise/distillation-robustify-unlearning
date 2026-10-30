@@ -47,11 +47,13 @@ def fake_ds(low, high, n=8):
     return Dataset.from_dict({"input_ids": ids.tolist(), "attention_mask": mask.tolist()})
 
 
-def select(model, target, frac=0.1, seed=111):
+def select(model, target, frac=0.1, seed=111, **kw):
     tok = PreTrainedTokenizerFast(tokenizer_object=Tokenizer(models.WordLevel({"<pad>": 0, "x": 1}, unk_token="x")),
                                   pad_token="<pad>")
+    if target == "neuron_rule" or kw.get("noise_count") is not None:
+        frac = None
     return select_mlp_neurons(model, target, frac, seed, saliency_ds=[fake_ds(50, 100), fake_ds(1, 50)],
-                              saliency_seqs=6, batch_size=4, tokenizer=tok, max_length=SEQ)
+                              saliency_seqs=6, batch_size=4, tokenizer=tok, max_length=SEQ, **kw)
 
 
 def test_all_mode_unchanged():
@@ -66,13 +68,15 @@ def test_all_mode_unchanged():
         assert torch.equal(p, q), n
 
 
-@pytest.mark.parametrize("target", ["neuron_act", "neuron_rand"])
-def test_selects_exactly_k_and_only_those_change(target):
+@pytest.mark.parametrize("target,kw", [("neuron_act", {}), ("neuron_rand", {}), ("neuron_rand", {"noise_count": 9}),
+                                       ("neuron_rule", {"p_kor_min": 0.5, "p_eng_max": 0.5})])
+def test_selects_exactly_k_and_only_those_change(target, kw):
     model = tiny_model()
     rng_before = torch.get_rng_state()
-    masks, record = select(model, target)
+    masks, record = select(model, target, **kw)
     assert torch.equal(rng_before, torch.get_rng_state())  # selection leaves the global RNG alone
-    k = round(0.1 * LAYERS * WIDTH)
+    k = {"neuron_rule": record["k"]}.get(target, kw.get("noise_count", round(0.1 * LAYERS * WIDTH)))
+    assert 0 < k < LAYERS * WIDTH
     assert record["k"] == k == sum(int(m.sum()) for m in masks) == sum(record["per_layer_counts"])
     assert sum(len(s) for s in record["selected"]) == k
     if target == "neuron_act":
@@ -139,3 +143,54 @@ def test_names_round_trip():
         partial_distill_name("F", 1.0, 1.0, 111, "early", noise_target="neuron_act")
     with pytest.raises(ValueError):
         partial_distill_name("F", 1.0, 1.0, 111, "early", noise_frac=0.05)
+
+
+def test_rand_count_is_exact_and_seeded():
+    m = tiny_model()
+    for n in (1, 9, 82 % (LAYERS * WIDTH), LAYERS * WIDTH):
+        masks, record = select(m, "neuron_rand", noise_count=n)
+        assert record["k"] == n == sum(int(x.sum()) for x in masks) == sum(record["per_layer_counts"])
+    a, b, c = (select(m, "neuron_rand", seed=s, noise_count=9)[1]["selected"] for s in (1, 1, 2))
+    assert a == b != c
+    # the count draws from the same seeded permutation as the fraction: n = round(frac x total) gives the same set
+    frac = select(m, "neuron_rand", frac=0.1)[1]["selected"]
+    assert select(m, "neuron_rand", noise_count=round(0.1 * LAYERS * WIDTH))[1]["selected"] == frac
+    with pytest.raises(AssertionError):
+        select_mlp_neurons(m, "neuron_rand", 0.1, 1, noise_count=9)
+    with pytest.raises(AssertionError):
+        select_mlp_neurons(m, "neuron_act", 0.1, 1, noise_count=9)
+
+
+def test_names_round_trip_rule_and_count():
+    plain = partial_distill_name("F", 1.0, 1.0, 112, "fixed_steps", 81)
+    rule = partial_distill_name("F", 1.0, 1.0, 112, "fixed_steps", 81, noise_target="neuron_rule", p_kor_min=0.2,
+                                p_eng_max=0.02, saliency_seqs=256)
+    rule64 = partial_distill_name("F", 1.0, 1.0, 112, "fixed_steps", 81, noise_target="neuron_rule", p_kor_min=0.1,
+                                  p_eng_max=0.1)
+    rand = partial_distill_name("F", 1.0, 1.0, 112, "fixed_steps", 81, noise_target="neuron_rand", noise_count=9)
+    # saliency_seqs does not enter rand names (as for '-nt_rand_f')
+    assert rand == partial_distill_name("F", 1.0, 1.0, 112, "fixed_steps", 81, noise_target="neuron_rand",
+                                        noise_count=9, saliency_seqs=256)
+    assert rule == plain + "-nt_rule_q0.2_r0.02_s256" and rule64 == plain + "-nt_rule_q0.1_r0.1"
+    assert rand == plain + "-nt_rand_n9"
+    for name, noise in ((rule, "nt_rule_q0.2_r0.02_s256"), (rule64, "nt_rule_q0.1_r0.1"), (rand, "nt_rand_n9"),
+                        (plain, None)):
+        meta = aggregate.describe_model(relearn_record_dir(name))
+        assert (meta["arm"], meta["alpha"], meta["seed"], meta["stop"], meta["noise"]) == \
+            ("F", 1.0, 112, "fixed_steps_81", noise), meta
+        m = aggregate.PARTIAL_RE.search(relearn_record_dir(name))
+        if noise == "nt_rule_q0.2_r0.02_s256":
+            assert (m["noise_target"], m["p_kor_min"], m["p_eng_max"], m["saliency_seqs"]) == ("rule", "0.2", "0.02", "256")
+        if noise == "nt_rand_n9":
+            assert (m["noise_target"], m["noise_count"], m["noise_frac"]) == ("rand", "9", None)
+    bad = [dict(noise_target="neuron_rand", noise_frac=0.05, noise_count=9),
+           dict(noise_target="neuron_rand"),
+           dict(noise_target="neuron_act", noise_count=9),
+           dict(noise_target="neuron_rule", p_kor_min=0.2),
+           dict(noise_target="neuron_rule", p_kor_min=0.2, p_eng_max=0.02, noise_frac=0.05),
+           dict(noise_target="neuron_act", noise_frac=0.05, p_kor_min=0.2, p_eng_max=0.02),
+           dict(noise_target="all", noise_count=9),
+           dict(noise_target="neuron_rand", noise_count=0)]
+    for kw in bad:
+        with pytest.raises(ValueError):
+            partial_distill_name("F", 1.0, 1.0, 112, "fixed_steps", 81, **kw)

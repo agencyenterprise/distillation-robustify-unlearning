@@ -3,6 +3,7 @@ import os
 import sys
 
 import numpy as np
+import pytest
 import torch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -10,7 +11,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "src"))
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 from run_neuron_stats_language import flatten, neuron_stats  # noqa: E402
-from src.tools.partial_distill_langarith import neuron_saliency  # noqa: E402
+from src.tools.partial_distill_langarith import neuron_saliency, select_mlp_neurons  # noqa: E402
 from test_targeted_noise import LAYERS, SEQ, WIDTH, fake_ds, select, tiny_model  # noqa: E402,F401
 from tokenizers import Tokenizer, models  # noqa: E402
 from transformers import PreTrainedTokenizerFast  # noqa: E402
@@ -71,3 +72,32 @@ def test_flatten_keys():
             assert int(arrays[f"n_tokens_{lang}_{split}"]) > 0
     # ratio_seqs >= n_seqs: 'first64' covers every sequence
     np.testing.assert_allclose(arrays["mean_abs_kor_first64"], arrays["mean_abs_kor_all"], rtol=1e-6)
+
+
+def test_rule_selects_exactly_the_neurons_passing_brute_force():
+    """neuron_rule == {P_kor >= q and P_eng <= r} with P from the brute-force reference, at thresholds that sit exactly
+    on observed values (>= and <= are inclusive), and its record carries each selected neuron's P_kor / P_eng."""
+    model = tiny_model()
+    kor_ds, eng_ds = fake_ds(50, 100, n=10), fake_ds(1, 50, n=10)
+    p_kor = reference(model, kor_ds, range(8))[0]["p_fire"]
+    p_eng = reference(model, eng_ds, range(8))[0]["p_fire"]
+    for q, r in ((float(np.median(p_kor)), float(np.median(p_eng))), (float(np.quantile(p_kor, 0.9)), 0.6),
+                 (0.0, 1.0)):
+        expected = (p_kor >= q) & (p_eng <= r)
+        masks, rec = select_mlp_neurons(model, "neuron_rule", None, 111, saliency_ds=[kor_ds, eng_ds], saliency_seqs=8,
+                                        batch_size=3, tokenizer=tok(), max_length=SEQ, p_kor_min=q, p_eng_max=r)
+        got = torch.stack(masks).numpy()
+        assert expected.any() and (got == expected).all(), (q, r, int(expected.sum()), int(got.sum()))
+        assert rec["k"] == int(expected.sum()) == sum(rec["per_layer_counts"])
+        assert (rec["p_kor_min"], rec["p_eng_max"]) == (q, r)
+        for i in range(LAYERS):
+            idx = rec["selected"][i]
+            np.testing.assert_allclose(rec["p_kor_selected"][i], p_kor[i, idx], rtol=1e-12)
+            np.testing.assert_allclose(rec["p_eng_selected"][i], p_eng[i, idx], rtol=1e-12)
+            assert all(v >= q for v in rec["p_kor_selected"][i]) and all(v <= r for v in rec["p_eng_selected"][i])
+    # the same p_fire as run_neuron_stats_language.py's neuron_stats ('all' split)
+    stats, _ = neuron_stats(model, kor_ds, 8, 4, tok(), SEQ, torch.device("cpu"), ratio_seqs=0)
+    np.testing.assert_array_equal(stats["all"]["p_fire"], p_kor)
+    with pytest.raises(AssertionError):   # nothing passes
+        select_mlp_neurons(model, "neuron_rule", None, 111, saliency_ds=[kor_ds, eng_ds], saliency_seqs=8,
+                           batch_size=3, tokenizer=tok(), max_length=SEQ, p_kor_min=1.1, p_eng_max=0.0)

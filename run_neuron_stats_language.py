@@ -24,9 +24,10 @@ import subprocess
 
 import numpy as np
 import torch
-from transformers import AutoModelForCausalLM, DataCollatorWithPadding
+from transformers import AutoModelForCausalLM
 
-from src.tools.partial_distill_langarith import load_tokenizer, load_train_dataset, mlp_modules
+# neuron_stats lives with neuron_saliency, so --noise_target neuron_rule selects on exactly these p_fire values.
+from src.tools.partial_distill_langarith import load_tokenizer, load_train_dataset, neuron_stats
 from src.utils.paths import CACHE_DIR, DATASET_DIR, MODEL_DIR
 from src.utils.run_names import TEACHER_LR, reference_models
 
@@ -34,73 +35,7 @@ from src.utils.run_names import TEACHER_LR, reference_models
 if os.environ.get("MATMUL_PRECISION"):
     torch.set_float32_matmul_precision(os.environ["MATMUL_PRECISION"])
 
-STATS = ("mean_abs", "mean", "p_fire")
 MAX_LENGTH = 2048  # setups['gemma-2-0.1B_MaxEnt']['max_length'] in run_partial_distill_language.py
-
-
-@torch.no_grad()
-def neuron_stats(model, ds, n_seqs, batch_size, tokenizer, max_length, device, ratio_seqs=64):
-    """Per-neuron stats on the first n_seqs rows of ds, for splits 'all', 'h0', 'h1' and f'first{ratio_seqs}'.
-    Returns {split: {stat: [num_layers, width] float64 ndarray}} and {split: n_tokens}."""
-    assert len(ds) >= n_seqs >= 2, f"need {n_seqs} sequences, the dataset has {len(ds)}"
-    half = n_seqs // 2
-    mlps = mlp_modules(model)
-    layers = getattr(model, "module", model).model.layers
-    num_layers, width = len(mlps), mlps[0][2].in_features
-    collator = DataCollatorWithPadding(tokenizer=tokenizer, padding="max_length", max_length=max_length)
-    model.eval()
-    model.to(device)
-    # acc[split_index][stat]; split 0 = h0, 1 = h1, 2 = first ratio_seqs (a subset of h0/h1, accumulated alongside)
-    acc = [{s: torch.zeros(num_layers, width, dtype=torch.float64, device=device) for s in STATS} for _ in range(3)]
-    tokens = [0.0, 0.0, 0.0]
-    state = {}
-
-    def down_hook(i):
-        def fn(module, args):
-            h, m = args[0].double(), state["mask"][..., None]
-            for k in state["targets"]:
-                acc[k]["mean_abs"][i] += (h.abs() * m).sum(dim=(0, 1))
-                acc[k]["mean"][i] += (h * m).sum(dim=(0, 1))
-        return fn
-
-    def gate_hook(i):
-        act_fn = layers[i].mlp.act_fn
-        def fn(module, args, output):
-            fire = (act_fn(output) > 0).double() * state["mask"][..., None]
-            for k in state["targets"]:
-                acc[k]["p_fire"][i] += fire.sum(dim=(0, 1))
-        return fn
-
-    handles = [down.register_forward_pre_hook(down_hook(i)) for i, (_, _, down) in enumerate(mlps)]
-    handles += [gate.register_forward_hook(gate_hook(i)) for i, (gate, _, _) in enumerate(mlps)]
-    try:
-        # Batches never straddle a split boundary (half, ratio_seqs), so each batch has one set of targets.
-        bounds = sorted({0, half, n_seqs, *( [ratio_seqs] if 0 < ratio_seqs < n_seqs else [] )})
-        for lo, hi in zip(bounds[:-1], bounds[1:]):
-            for start in range(lo, hi, batch_size):
-                end = min(start + batch_size, hi)
-                rows = ds.select(range(start, end))
-                batch = collator([{"input_ids": r["input_ids"], "attention_mask": r["attention_mask"]} for r in rows])
-                mask = batch["attention_mask"].to(device)
-                state["mask"] = mask.double()
-                state["targets"] = [0 if start < half else 1] + ([2] if start < ratio_seqs else [])
-                n = mask.sum().item()
-                for k in state["targets"]:
-                    tokens[k] += n
-                model.model(input_ids=batch["input_ids"].to(device), attention_mask=mask)
-    finally:
-        for h in handles:
-            h.remove()
-    out, n_tokens = {}, {}
-    names = ["h0", "h1", f"first{ratio_seqs}"]
-    for k, name in enumerate(names):
-        if tokens[k]:
-            out[name] = {s: (acc[k][s] / tokens[k]).cpu().numpy() for s in STATS}
-            n_tokens[name] = int(tokens[k])
-    tot = tokens[0] + tokens[1]
-    out["all"] = {s: ((acc[0][s] + acc[1][s]) / tot).cpu().numpy() for s in STATS}
-    n_tokens["all"] = int(tot)
-    return out, n_tokens
 
 
 def flatten(per_lang, n_tokens_per_lang):
