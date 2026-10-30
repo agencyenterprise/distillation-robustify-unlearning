@@ -35,6 +35,8 @@ def reference_models(teacher_lr=TEACHER_LR):
     return {
         'base'        : 'pretrained_models/gemma-2-0.1B_eng+kor',   # pretrained on English + Korean
         'filter'      : 'pretrained_models/gemma-2-0.1B_eng',       # data-filtered oracle: English only
+        # v4 only: English only for the base's 969 optimizer steps (compute-matched filter; models_v4 link)
+        'filter_steps969': 'pretrained_models/gemma-2-0.1B_eng_steps969',
         'unlearn'     : unlearned_model(teacher_lr),                # MaxEnt teacher
         'full_distill': full_distill_model(teacher_lr),             # MaxEnt teacher -> random init
     }
@@ -42,7 +44,7 @@ def reference_models(teacher_lr=TEACHER_LR):
 
 REFERENCE_MODELS = reference_models()   # at the default teacher LR
 
-ARMS = ['A', 'B', 'C', 'D', 'E', 'F', 'G']
+ARMS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']
 RANDOM_TARGET_ARMS = ['D', 'E']   # these take --kor_targets
 KOR_TARGETS = ['uniform', 'unigram']
 STOP_MODES = ['fixed_steps', 'early', 'epoch']

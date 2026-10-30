@@ -1,6 +1,7 @@
 """AGI-2569: base pretraining on data v2 (packed, fp32 + TF32) with an explicit global batch geometry, to test which
-geometry gives the paper's base (English 4.94 / Korean 3.47). Env: BATCH, GA (per process), TAG (output suffix); the
-process count comes from `accelerate launch --num_processes`. Paper App. B.2 says full distillation used "the same number
+geometry gives the paper's base (English 4.94 / Korean 3.47). Env: BATCH, GA (per process), TAG (output suffix), and
+optionally MAX_STEPS (exactly that many optimizer steps, crossing epochs, with the schedule spanning them; unset = one
+epoch as before); the process count comes from `accelerate launch --num_processes`. Paper App. B.2 says full distillation used "the same number
 of update steps as its pretrained counterpart" (807 steps at 4 x 60 x 4 = 960 sequences); App. A lists 5 x 80 per GPU."""
 import os, sys
 sys.path.insert(0, os.getcwd())
@@ -10,4 +11,6 @@ tag = os.environ["TAG"]
 s = m.setups[setup]
 s.update(join_or_subsequence=True, batch_size=int(os.environ["BATCH"]), gradient_accumulation_steps=int(os.environ["GA"]),
          output_dir=s["output_dir"] + f"_{tag}", path_local_record=s["path_local_record"].replace(".txt", f"_{tag}.txt"))
+if os.environ.get("MAX_STEPS"):
+    s.update(max_steps=int(os.environ["MAX_STEPS"]), epochs=1000, schedule_over_max_steps=True)
 m.launch_pretrain(setup)

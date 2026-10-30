@@ -86,6 +86,9 @@ ARM_CONFIGS = {
     'E': {'domains': ['eng', 'kor'], 'loss_type': 'ce', 'random_kor': True,  'student': 'base'},
     'F': {'domains': ['eng'],        'loss_type': 'ce', 'random_kor': False, 'student': 'base'},
     'G': {'domains': ['eng', 'kor'], 'loss_type': 'ce', 'random_kor': False, 'student': 'unlearn'},
+    # F from a data-filtered model (v4): H from the one-epoch filter, I from the compute-matched 969-step filter
+    'H': {'domains': ['eng'],        'loss_type': 'ce', 'random_kor': False, 'student': 'filter'},
+    'I': {'domains': ['eng'],        'loss_type': 'ce', 'random_kor': False, 'student': 'filter_steps969'},
 }
 TRAIN_FILES = {'eng': ENG_TRAIN_FILE, 'kor': KOR_TRAIN_FILE}
 

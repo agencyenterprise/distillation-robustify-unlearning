@@ -55,6 +55,7 @@ def train(
 
     use_local_record,
     path_local_record,
+    schedule_over_max_steps=False,
 ):
     """
     Training script using Accelerate on pretokenized JSONL datasets.
@@ -143,7 +144,10 @@ def train(
     effective_steps_per_epoch = steps_per_epoch // gradient_accumulation_steps
     total_steps = effective_steps_per_epoch * epochs
     if max_steps > 0:
-        total_steps = min(total_steps, max_steps)
+        # max_steps counts optimizer steps; total_steps counts scheduler ticks (num_processes per optimizer step under
+        # Accelerate). schedule_over_max_steps (AGI-2569) makes the warmup + decay span exactly max_steps optimizer steps,
+        # crossing epochs; the default keeps upstream's min(), so existing runs are unchanged.
+        total_steps = max_steps * accelerator.num_processes if schedule_over_max_steps else min(total_steps, max_steps)
     print_acc(f"[pretrain.py] {steps_per_epoch} steps per epoch, {total_steps // accelerator.num_processes} steps total", print_message)
 
     print_acc(f"[pretrain.py] Using AdamW optimizer, LR={learning_rate}, weight_decay={weight_decay}", print_message)

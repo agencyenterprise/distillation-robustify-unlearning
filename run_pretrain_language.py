@@ -348,6 +348,7 @@ def launch_pretrain(setup_id):
         wandb_api_key    = setups[setup_id]['wandb_api_key'],
         use_local_record = setups[setup_id]['use_local_record'],
         path_local_record= setups[setup_id]['path_local_record'],
+        schedule_over_max_steps = setups[setup_id].get('schedule_over_max_steps', False),
     )
 
 if __name__ == "__main__":

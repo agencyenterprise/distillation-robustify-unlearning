@@ -28,7 +28,8 @@ case $AGI2569_V in
        mkdir -p "$MODEL_DIR/pretrained_models"
        for l in "random_init_models:$WORK/models/random_init_models" \
                 "pretrained_models/gemma-2-0.1B_eng+kor:$WORK/models_v2/pretrained_models/gemma-2-0.1B_eng+kor_g2x5x80" \
-                "pretrained_models/gemma-2-0.1B_eng:$WORK/models_v2/pretrained_models/gemma-2-0.1B_eng_g2x5x80"; do
+                "pretrained_models/gemma-2-0.1B_eng:$WORK/models_v2/pretrained_models/gemma-2-0.1B_eng_g2x5x80" \
+                "pretrained_models/gemma-2-0.1B_eng_steps969:$WORK/models_v2/pretrained_models/gemma-2-0.1B_eng_g2x5x80_steps969"; do
            [ -e "$MODEL_DIR/${l%%:*}" ] || [ -L "$MODEL_DIR/${l%%:*}" ] || ln -s "${l#*:}" "$MODEL_DIR/${l%%:*}" 2>/dev/null || [ -e "$MODEL_DIR/${l%%:*}" ]
        done ;;
     *) echo "[env] unknown AGI2569_V=$AGI2569_V" >&2; exit 1 ;;
