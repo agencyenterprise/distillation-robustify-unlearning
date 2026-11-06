@@ -49,6 +49,11 @@ esac
 # HF_TOKEN (Gemma licence) lives in ~/.env; huggingface_hub reads it from the environment.
 if [ -f "$HOME/.env" ]; then set -a; . "$HOME/.env"; set +a; fi
 
+# S3 uploads use the team's programmatic AWS user (ae-gr-programmatic-user), not a personal `aws login` session,
+# which expires mid-queue. The file is maintained by the GR team on the shared volume.
+TEAM_ENV=/mnt/polished-lake/shared/gradient-routing/.catalog/catalog.env
+if [ -r "$TEAM_ENV" ]; then set -a; . "$TEAM_ENV"; set +a; fi
+
 # Training reads only local files. Jobs that download (data.sbatch) set ONLINE=1.
 if [ "${ONLINE:-0}" != 1 ]; then
     export HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1
