@@ -32,6 +32,8 @@ name suffix, and the selection is written next to the run's record as <record>_n
 'neuron_rand' with --noise_count N instead of --noise_frac noises exactly N random neurons ('-nt_rand_n<N>'; size-matched
 controls). 'neuron_rule' noises every neuron with firing probability P_kor >= --p_kor_min and P_eng <= --p_eng_max on
 --saliency_seqs Korean / English train sequences (p_fire as run_neuron_stats_language.py; '-nt_rule_q<q>_r<r>').
+'neuron_engrank' noises round(--noise_frac x all) neurons: of those with P_kor >= --p_kor_min and P_kor > P_eng, the
+ones with the lowest P_eng (ties by index; '-nt_engrank_q<q>_f<f>').
 --dry_select: only that selection (single-experiment flags; no training, nothing written), printing its size.
 
 GPUs: the paper ran every language UNDO run on 4 H200s (arXiv 2506.06278, App. E): per-process batch 4 x 60
@@ -335,7 +337,7 @@ def warm_cache(args):
         batch_size=current_setup['batch_size'], accelerator=accelerator)
     tokenizer = load_tokenizer(teacher, current_setup['cache_dir'])
     domain_sets = {(tuple(ARM_CONFIGS[arm]['domains']), seed) for arm in args.arms for seed in args.seeds}
-    if getattr(args, 'noise_target', 'all') in ('neuron_act', 'neuron_rule'):  # saliency reads each train file on its own (seed unused for one file)
+    if getattr(args, 'noise_target', 'all') in ('neuron_act', 'neuron_rule', 'neuron_engrank'):  # saliency reads each train file on its own (seed unused for one file)
         domain_sets |= {(('kor',), seed) for seed in args.seeds} | {(('eng',), seed) for seed in args.seeds}
     for domains, seed in sorted(domain_sets):
         train_ds = load_train_dataset([TRAIN_FILES[d] for d in domains], tokenizer, current_setup['max_length'], True,
@@ -402,7 +404,7 @@ def dry_select(args):
     tokenizer = load_tokenizer(teacher, setup['cache_dir'])
     model = AutoModelForCausalLM.from_pretrained(student, cache_dir=setup['cache_dir'], attn_implementation='eager')
     saliency_ds = None
-    if args.noise_target in ('neuron_act', 'neuron_rule'):
+    if args.noise_target in ('neuron_act', 'neuron_rule', 'neuron_engrank'):
         saliency_ds = [load_train_dataset([f], tokenizer, setup['max_length'], True, [1.0], args.seed, 'first_exhausted',
                                           setup['dataset_cache_dir']) for f in (KOR_TRAIN_FILE, ENG_TRAIN_FILE)]
     _, record = select_mlp_neurons(
@@ -417,6 +419,9 @@ def dry_select(args):
     print(f"[dry_select] {suffix}, seed {args.seed}")
     print(f"[dry_select] per layer {record['per_layer_counts']}")
     print(f"[dry_select] SELECTED {record['k']} of {record['total_neurons']} MLP neurons")
+    if args.noise_target == 'neuron_engrank':
+        print(f"[dry_select] eligible {record['n_eligible']}, effective r {record['effective_r']:.6g}, median p_kor "
+              f"{record['median_p_kor_selected']:.6g}, median p_eng {record['median_p_eng_selected']:.6g}")
     if args.dry_select_out:
         os.makedirs(os.path.dirname(os.path.abspath(args.dry_select_out)), exist_ok=True)
         with open(args.dry_select_out, "w", encoding="utf-8") as f:
@@ -503,11 +508,12 @@ if __name__ == "__main__":
                         help="neuron_rand: noise exactly this many random neurons instead of --noise_frac (one of the "
                              "two); adds '-nt_rand_n<N>' to the run name")
     parser.add_argument('--p_kor_min', type=float, default=None,
-                        help='neuron_rule: noise every neuron firing on >= this fraction of Korean tokens ...')
+                        help='neuron_rule: noise every neuron firing on >= this fraction of Korean tokens ...; '
+                             'neuron_engrank: eligibility threshold (with --noise_frac)')
     parser.add_argument('--p_eng_max', type=float, default=None,
                         help="... and on <= this fraction of English tokens; adds '-nt_rule_q<q>_r<r>' to the name")
     parser.add_argument('--saliency_seqs', type=int, default=SALIENCY_SEQS,
-                        help='neuron_act / neuron_rule: Korean and English train sequences each to score neurons on '
+                        help='neuron_act / neuron_rule / neuron_engrank: Korean and English train sequences each to score neurons on '
                              "(default 64; other values add '_s<n>' to the name)")
     parser.add_argument('--dry_select', action='store_true',
                         help='Only compute and print the targeted-noise selection of the single-experiment flags '

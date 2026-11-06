@@ -152,7 +152,8 @@ for arm, stop_mode in (("A", "fixed_steps"), ("D", "fixed_steps"), ("C", "early"
 
 # Targeted noise (AGI-2635): the same neurons selected and the same noised student on every rank.
 for kw in (dict(noise_target="neuron_act", noise_frac=0.05), dict(noise_target="neuron_rand", noise_frac=0.05),
-           dict(noise_target="neuron_rand", noise_count=5), dict(noise_target="neuron_rule", p_kor_min=0.3, p_eng_max=0.7)):
+           dict(noise_target="neuron_rand", noise_count=5), dict(noise_target="neuron_rule", p_kor_min=0.3, p_eng_max=0.7),
+           dict(noise_target="neuron_engrank", noise_frac=0.05, p_kor_min=0.0)):
     pd.run_experiment("gemma-2-0.1B_MaxEnt", 1.0, 1.0, 111, "F", "uniform", "early", max_steps=2, saliency_seqs=4, **kw)
     state.wait_for_everyone()
     sums = [None] * NPROC

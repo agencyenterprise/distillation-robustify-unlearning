@@ -12,7 +12,7 @@ from transformers import Gemma2Config, Gemma2ForCausalLM, PreTrainedTokenizerFas
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "src"))
-from src.tools.partial_distill_langarith import do_corruption, mlp_modules, select_mlp_neurons  # noqa: E402
+from src.tools.partial_distill_langarith import do_corruption, mlp_modules, neuron_stats, select_mlp_neurons  # noqa: E402
 from src.utils.run_names import partial_distill_name, relearn_record_dir  # noqa: E402
 sys.path.insert(0, os.path.join(ROOT, "analysis", "agi2569"))
 import aggregate  # noqa: E402
@@ -69,7 +69,8 @@ def test_all_mode_unchanged():
 
 
 @pytest.mark.parametrize("target,kw", [("neuron_act", {}), ("neuron_rand", {}), ("neuron_rand", {"noise_count": 9}),
-                                       ("neuron_rule", {"p_kor_min": 0.5, "p_eng_max": 0.5})])
+                                       ("neuron_rule", {"p_kor_min": 0.5, "p_eng_max": 0.5}),
+                                       ("neuron_engrank", {"p_kor_min": 0.0})])
 def test_selects_exactly_k_and_only_those_change(target, kw):
     model = tiny_model()
     rng_before = torch.get_rng_state()
@@ -194,3 +195,75 @@ def test_names_round_trip_rule_and_count():
     for kw in bad:
         with pytest.raises(ValueError):
             partial_distill_name("F", 1.0, 1.0, 112, "fixed_steps", 81, **kw)
+
+
+def brute_force_engrank(model, frac, q):
+    """p_fire as neuron_rule computes it, then eligibility, ascending P_eng, ties by flat index, in plain Python."""
+    tok = PreTrainedTokenizerFast(tokenizer_object=Tokenizer(models.WordLevel({"<pad>": 0, "x": 1}, unk_token="x")),
+                                  pad_token="<pad>")
+    p = [neuron_stats(model, ds, 6, 4, tok, SEQ, torch.device("cpu"), ratio_seqs=0)[0]["all"]["p_fire"].flatten()
+         for ds in (fake_ds(50, 100), fake_ds(1, 50))]
+    eligible = [i for i in range(LAYERS * WIDTH) if p[0][i] >= q and p[0][i] > p[1][i]]
+    k = round(frac * LAYERS * WIDTH)
+    return sorted(sorted(eligible, key=lambda i: (p[1][i], i))[:k]), eligible, p
+
+
+@pytest.mark.parametrize("frac,q", [(0.1, 0.0), (0.05, 0.2), (1 / (LAYERS * WIDTH), 0.0)])
+def test_engrank_matches_brute_force(frac, q):
+    model = tiny_model()
+    masks, record = select(model, "neuron_engrank", frac=frac, p_kor_min=q)
+    want, eligible, p = brute_force_engrank(model, frac, q)
+    got = [i * WIDTH + j for i, sel in enumerate(record["selected"]) for j in sel]
+    assert got == want and record["k"] == len(want) == round(frac * LAYERS * WIDTH)
+    assert record["n_eligible"] == len(eligible) and record["p_kor_min"] == q and record["p_eng_max"] is None
+    assert record["effective_r"] == max(p[1][i] for i in want)
+    assert record["median_p_eng_selected"] == torch.tensor(p[1][want]).median().item()
+    assert record["median_p_kor_selected"] == torch.tensor(p[0][want]).median().item()
+    assert record["per_layer_counts"] == [int(m.sum()) for m in masks]
+
+
+def test_engrank_tie_break_and_too_few_eligible(monkeypatch):
+    """Constant p_fire tables: every eligible neuron ties on P_eng, so the lowest flat indices win; k > eligible fails."""
+    import src.tools.partial_distill_langarith as pdl
+    total = LAYERS * WIDTH
+    p_kor = torch.zeros(total, dtype=torch.float64)
+    p_kor[::2] = 0.5   # 72 eligible (even indices) at q 0.3
+    p_eng = torch.full((total,), 0.1, dtype=torch.float64)
+    p_eng[10] = 0.05   # strictly lowest: first
+    tables = iter([p_kor, p_eng] * 2)
+    monkeypatch.setattr(pdl, "neuron_stats", lambda *a, **kw: (
+        {"all": {"p_fire": next(tables).view(LAYERS, WIDTH).numpy()}}, {"all": 1}))
+    _, record = select(tiny_model(), "neuron_engrank", frac=0.05, p_kor_min=0.3)   # k = 7
+    got = [i * WIDTH + j for i, sel in enumerate(record["selected"]) for j in sel]
+    assert got == [0, 2, 4, 6, 8, 10, 12] and record["n_eligible"] == 72 and record["effective_r"] == 0.1
+    with pytest.raises(AssertionError, match="neuron_engrank"):
+        select(tiny_model(), "neuron_engrank", frac=0.6, p_kor_min=0.3)   # k = 86 > 72
+
+
+def test_engrank_flags():
+    m = tiny_model()
+    for kw in (dict(p_kor_min=0.2, p_eng_max=0.02), dict(p_kor_min=0.2, noise_count=9)):
+        with pytest.raises(AssertionError):
+            select_mlp_neurons(m, "neuron_engrank", 0.1, 1, **kw)
+    with pytest.raises(AssertionError):
+        select_mlp_neurons(m, "neuron_engrank", 0.1, 1)
+
+
+def test_names_round_trip_engrank():
+    plain = partial_distill_name("F", 1.0, 1.0, 111, "fixed_steps", 81)
+    er = partial_distill_name("F", 1.0, 1.0, 111, "fixed_steps", 81, noise_target="neuron_engrank", p_kor_min=0.2,
+                              noise_frac=0.005, saliency_seqs=256)
+    er64 = partial_distill_name("F", 1.0, 1.0, 111, "fixed_steps", 81, noise_target="neuron_engrank", p_kor_min=0.2,
+                                noise_frac=0.02)
+    assert er == plain + "-nt_engrank_q0.2_f0.005_s256" and er64 == plain + "-nt_engrank_q0.2_f0.02"
+    for name, noise, frac, seqs in ((er, "nt_engrank_q0.2_f0.005_s256", "0.005", "256"),
+                                    (er64, "nt_engrank_q0.2_f0.02", "0.02", None)):
+        meta = aggregate.describe_model(relearn_record_dir(name))
+        assert (meta["arm"], meta["seed"], meta["stop"], meta["noise"]) == ("F", 111, "fixed_steps_81", noise), meta
+        m = aggregate.PARTIAL_RE.search(relearn_record_dir(name))
+        assert (m["noise_target"], m["p_kor_min"], m["engrank_frac"], m["p_eng_max"], m["noise_frac"],
+                m["saliency_seqs"]) == ("engrank", "0.2", frac, None, None, seqs)
+    for kw in (dict(p_kor_min=0.2), dict(noise_frac=0.005), dict(p_kor_min=0.2, noise_frac=0.005, p_eng_max=0.02),
+               dict(p_kor_min=0.2, noise_frac=0.005, noise_count=9), dict(p_kor_min=1.5, noise_frac=0.005)):
+        with pytest.raises(ValueError):
+            partial_distill_name("F", 1.0, 1.0, 111, "fixed_steps", 81, noise_target="neuron_engrank", **kw)

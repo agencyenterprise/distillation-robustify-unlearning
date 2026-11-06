@@ -207,7 +207,7 @@ def partial_distill(
     neuron_masks = None
     if noise_target != "all":
         saliency_ds = None
-        if noise_target in ("neuron_act", "neuron_rule"):
+        if noise_target in ("neuron_act", "neuron_rule", "neuron_engrank"):
             with accelerator.main_process_first():
                 saliency_ds = [load_train_dataset([f], tokenizer, max_length, join_or_subsequence, [1.0], seed,
                                                   stopping_strategy, dataset_cache_dir, print_message)
@@ -663,6 +663,9 @@ def select_mlp_neurons(model, noise_target, noise_frac, seed, accelerator=None, 
       neuron_rule  every neuron with p_fire(forget) >= p_kor_min and p_fire(retain) <= p_eng_max, p_fire as
                    run_neuron_stats_language.py computes it (neuron_stats, split 'all') on saliency_seqs sequences each;
                    k is however many pass
+      neuron_engrank  k = round(noise_frac x all): of the neurons with p_fire(forget) >= p_kor_min and
+                   p_fire(forget) > p_fire(retain) (p_fire as neuron_rule), the k with the lowest p_fire(retain), ties
+                   broken by flat index (layer-major); k must not exceed the number eligible
     Scores are computed on `device` (default: the accelerator's, else CPU); with several processes rank 0's are
     broadcast, so every rank selects the same neurons.
     Returns ([num_layers] bool masks over each layer's neurons, a JSON-able record of the selection)."""
@@ -676,6 +679,10 @@ def select_mlp_neurons(model, noise_target, noise_frac, seed, accelerator=None, 
         assert noise_frac is None and noise_count is None, "neuron_rule selects by threshold, not by size"
         assert p_kor_min is not None and p_eng_max is not None, "neuron_rule needs p_kor_min and p_eng_max"
         k = None
+    elif noise_target == "neuron_engrank":
+        assert noise_count is None and p_eng_max is None, "neuron_engrank takes noise_frac and p_kor_min only"
+        assert noise_frac is not None and p_kor_min is not None, "neuron_engrank needs noise_frac and p_kor_min"
+        k = round(noise_frac * total)
     elif noise_target == "neuron_rand" and noise_count is not None:
         assert noise_frac is None, "neuron_rand takes noise_frac or noise_count, not both"
         k = int(noise_count)
@@ -684,7 +691,7 @@ def select_mlp_neurons(model, noise_target, noise_frac, seed, accelerator=None, 
         k = round(noise_frac * total)
     assert k is None or 0 < k <= total, (noise_frac, noise_count, total)
     record = {"num_layers": num_layers, "intermediate_size": width, "total_neurons": total, "k": k}
-    if noise_target == "neuron_rule":
+    if noise_target in ("neuron_rule", "neuron_engrank"):
         p_fire, n_tokens = [], []
         for ds in saliency_ds:
             stats, n_tok = neuron_stats(model, ds, saliency_seqs, batch_size, tokenizer, max_length, device,
@@ -696,9 +703,19 @@ def select_mlp_neurons(model, noise_target, noise_frac, seed, accelerator=None, 
             from accelerate.utils import broadcast
             p = broadcast(p.to(accelerator.device), from_process=0).cpu()
         p_kor, p_eng = p[0].flatten(), p[1].flatten()
-        chosen = torch.nonzero((p_kor >= p_kor_min) & (p_eng <= p_eng_max)).flatten()
-        k = record["k"] = len(chosen)
-        assert k > 0, f"no neuron has p_fire(kor) >= {p_kor_min} and p_fire(eng) <= {p_eng_max}"
+        if noise_target == "neuron_rule":
+            chosen = torch.nonzero((p_kor >= p_kor_min) & (p_eng <= p_eng_max)).flatten()
+            k = record["k"] = len(chosen)
+            assert k > 0, f"no neuron has p_fire(kor) >= {p_kor_min} and p_fire(eng) <= {p_eng_max}"
+        else:
+            eligible = torch.nonzero((p_kor >= p_kor_min) & (p_kor > p_eng)).flatten()   # ascending flat index
+            assert k <= len(eligible), (f"neuron_engrank: k={k} > {len(eligible)} neurons with p_fire(kor) >= "
+                                        f"{p_kor_min} and p_fire(kor) > p_fire(eng)")
+            order = torch.sort(p_eng[eligible], stable=True).indices   # stable: ties keep flat-index order
+            chosen = eligible[order[:k]]
+            record.update(n_eligible=len(eligible), effective_r=p_eng[chosen].max().item(),
+                          median_p_kor_selected=p_kor[chosen].median().item(),
+                          median_p_eng_selected=p_eng[chosen].median().item())
         record.update(p_kor_min=p_kor_min, p_eng_max=p_eng_max, n_tokens_kor=n_tokens[0], n_tokens_eng=n_tokens[1],
                       p_fire_kor_mean_per_layer=p[0].mean(dim=1).tolist(),
                       p_fire_eng_mean_per_layer=p[1].mean(dim=1).tolist())
@@ -727,7 +744,7 @@ def select_mlp_neurons(model, noise_target, noise_frac, seed, accelerator=None, 
     masks = list(flat.view(num_layers, width))
     record["per_layer_counts"] = [int(m.sum()) for m in masks]
     record["selected"] = [torch.nonzero(m).flatten().tolist() for m in masks]
-    if noise_target == "neuron_rule":   # aligned with record["selected"]
+    if noise_target in ("neuron_rule", "neuron_engrank"):   # aligned with record["selected"]
         record["p_kor_selected"] = [p[0][i][m].tolist() for i, m in enumerate(masks)]
         record["p_eng_selected"] = [p[1][i][m].tolist() for i, m in enumerate(masks)]
     return masks, record

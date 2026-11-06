@@ -14,13 +14,15 @@
 # fixed_steps' override, and no reliance on argparse prefix-matching --stop_mode to the relearn's --stop_modes).
 # Arguments: arm alpha beta fixed_steps warmup_frac|none noise_target [noise_spec] [seed=N] [seqs=N]. Pass --time; submit
 # from the repo root. noise_spec by noise_target: all: none; neuron_act: the fraction; neuron_rand: the fraction, or
-# n<N> for exactly N neurons (--noise_count); neuron_rule: q<q>_r<r> (--p_kor_min q --p_eng_max r). seed=N (default
-# 111, the runs' seed) goes to both stages as --seeds N; seqs=N as --saliency_seqs N (neuron_act / neuron_rule; default
-# 64; other values add '_s<N>' to the name). E.g. the 2% budget, 5% of neurons by activation saliency:
+# n<N> for exactly N neurons (--noise_count); neuron_rule: q<q>_r<r> (--p_kor_min q --p_eng_max r); neuron_engrank:
+# q<q>_f<f> (--p_kor_min q --noise_frac f). seed=N (default 111, the runs' seed) goes to both stages as --seeds N; seqs=N
+# as --saliency_seqs N (neuron_act / neuron_rule / neuron_engrank; default 64; other values add '_s<N>' to the name). E.g. the 2% budget, 5% of neurons by activation saliency:
 #   sbatch --time=01:30:00 -J agi2635-fx16-act0.05 cluster/agi2635/fixed_point.sbatch F 1.0 1.0 16 0.1 neuron_act 0.05
 # the firing-probability rule and its size-matched random control, seed 112:
 #   sbatch --time=02:00:00 cluster/agi2635/fixed_point.sbatch F 1.0 1.0 81 none neuron_rule q0.2_r0.02 seqs=256 seed=112
 #   sbatch --time=02:00:00 cluster/agi2635/fixed_point.sbatch F 1.0 1.0 81 none neuron_rand n9 seed=112
+# the 0.5% of neurons with the lowest P_eng among P_kor >= 0.2 and P_kor > P_eng ("method 2b"):
+#   sbatch --time=02:00:00 cluster/agi2635/fixed_point.sbatch F 1.0 1.0 81 none neuron_engrank q0.2_f0.005 seqs=256
 # and the no-noise baseline shape: ... fixed_point.sbatch F 0.0 0.1 403 none all
 # Defaults: AGI2569_V=4, PRECISION=fp32, MATMUL_PRECISION=high (override with sbatch --export=ALL,...).
 export AGI2569_V=${AGI2569_V:-4} PRECISION=${PRECISION:-fp32} MATMUL_PRECISION=${MATMUL_PRECISION:-high}
@@ -41,6 +43,7 @@ case $nt:$spec in
     neuron_rand:n*) nc=${spec#n} ;;
     neuron_act:?*|neuron_rand:?*) nf=$spec ;;
     neuron_rule:q*_r*) q=${spec#q}; q=${q%%_r*}; r=${spec##*_r} ;;
+    neuron_engrank:q*_f*) q=${spec#q}; q=${q%%_f*}; nf=${spec##*_f} ;;
     *) echo "[agi2635] noise_target $nt does not take noise_spec '$spec'" >&2; exit 2 ;;
 esac
 
@@ -49,7 +52,8 @@ common=(--arms "$arm" --alphas "$alpha" --betas "$beta" --seeds "$seed" --kor_ta
 [ "$nt" = all ] || common+=(--noise_target "$nt")
 [ -z "$nf" ] || common+=(--noise_frac "$nf")
 [ -z "$nc" ] || common+=(--noise_count "$nc")
-[ -z "$q" ] || common+=(--p_kor_min "$q" --p_eng_max "$r")
+[ -z "$q" ] || common+=(--p_kor_min "$q")
+[ -z "$r" ] || common+=(--p_eng_max "$r")
 [ -z "$seqs" ] || common+=(--saliency_seqs "$seqs")
 
 NAME=$($PY -c "import sys; from src.utils.run_names import SALIENCY_SEQS, partial_distill_name as n

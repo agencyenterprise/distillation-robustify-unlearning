@@ -51,9 +51,10 @@ STOP_MODES = ['fixed_steps', 'early', 'epoch']
 STOP_RULES = ['pooled', 'any_shard']
 # What the one-time noise hits (AGI-2635): 'all' (upstream: every 2-D parameter), or a fraction of the MLP neurons,
 # chosen by forget/retain activation saliency ('neuron_act') or uniformly at random ('neuron_rand', its control), or
-# every MLP neuron passing a firing-probability rule ('neuron_rule': P_kor >= q and P_eng <= r).
+# every MLP neuron passing a firing-probability rule ('neuron_rule': P_kor >= q and P_eng <= r), or the noise_frac
+# fraction with the lowest P_eng among P_kor >= q and P_kor > P_eng ('neuron_engrank').
 # Only the targeted modes add to the name, so 'all' names are unchanged.
-NOISE_TARGETS = ['all', 'neuron_act', 'neuron_rand', 'neuron_rule']
+NOISE_TARGETS = ['all', 'neuron_act', 'neuron_rand', 'neuron_rule', 'neuron_engrank']
 SALIENCY_SEQS = 64        # neuron_act / neuron_rule: Korean and English train sequences each used to score neurons
 
 SWEEP_ALPHAS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
@@ -95,18 +96,19 @@ def noise_suffix(noise_target='all', noise_frac=None, saliency_seqs=SALIENCY_SEQ
       neuron_act   '-nt_act_f<frac>'
       neuron_rand  '-nt_rand_f<frac>', or '-nt_rand_n<count>' with noise_count (exactly one of the two)
       neuron_rule  '-nt_rule_q<p_kor_min>_r<p_eng_max>'
-    plus '_s<n>' when neuron_act / neuron_rule score neurons on a non-default number of sequences."""
+      neuron_engrank  '-nt_engrank_q<p_kor_min>_f<frac>'
+    plus '_s<n>' when neuron_act / neuron_rule / neuron_engrank score neurons on a non-default number of sequences."""
     if noise_target not in NOISE_TARGETS:
         raise ValueError(f"unknown noise_target {noise_target!r}")
     if noise_target == 'all':
         if noise_frac is not None or noise_count is not None or p_kor_min is not None or p_eng_max is not None:
             raise ValueError("noise_frac / noise_count / p_kor_min / p_eng_max apply only to targeted noise")
         return ""
-    if noise_target != 'neuron_rule' and (p_kor_min is not None or p_eng_max is not None):
-        raise ValueError("p_kor_min / p_eng_max apply only to noise_target 'neuron_rule'")
+    if noise_target not in ('neuron_rule', 'neuron_engrank') and (p_kor_min is not None or p_eng_max is not None):
+        raise ValueError("p_kor_min / p_eng_max apply only to noise_target 'neuron_rule' (p_kor_min: also 'neuron_engrank')")
     if noise_target != 'neuron_rand' and noise_count is not None:
         raise ValueError("noise_count applies only to noise_target 'neuron_rand'")
-    seqs = (f"_s{saliency_seqs}" if noise_target in ('neuron_act', 'neuron_rule') and saliency_seqs != SALIENCY_SEQS
+    seqs = (f"_s{saliency_seqs}" if noise_target in ('neuron_act', 'neuron_rule', 'neuron_engrank') and saliency_seqs != SALIENCY_SEQS
             else "")
     if noise_target == 'neuron_rule':
         if noise_frac is not None:
@@ -114,6 +116,14 @@ def noise_suffix(noise_target='all', noise_frac=None, saliency_seqs=SALIENCY_SEQ
         if p_kor_min is None or p_eng_max is None or not (0 <= p_kor_min <= 1 and 0 <= p_eng_max <= 1):
             raise ValueError(f"neuron_rule needs 0 <= p_kor_min, p_eng_max <= 1, got {p_kor_min!r}, {p_eng_max!r}")
         return f"-nt_rule_q{fmt(p_kor_min)}_r{fmt(p_eng_max)}{seqs}"
+    if noise_target == 'neuron_engrank':
+        if p_eng_max is not None:
+            raise ValueError("neuron_engrank ranks by P_eng: no p_eng_max")
+        if p_kor_min is None or not 0 <= p_kor_min <= 1:
+            raise ValueError(f"neuron_engrank needs 0 <= p_kor_min <= 1, got {p_kor_min!r}")
+        if noise_frac is None or not 0 < noise_frac <= 1:
+            raise ValueError(f"neuron_engrank needs 0 < noise_frac <= 1, got {noise_frac!r}")
+        return f"-nt_engrank_q{fmt(p_kor_min)}_f{fmt(noise_frac)}{seqs}"
     if noise_count is not None:
         if noise_frac is not None:
             raise ValueError("neuron_rand takes noise_frac or noise_count, not both")
