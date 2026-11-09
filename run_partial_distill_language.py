@@ -34,6 +34,8 @@ controls). 'neuron_rule' noises every neuron with firing probability P_kor >= --
 --saliency_seqs Korean / English train sequences (p_fire as run_neuron_stats_language.py; '-nt_rule_q<q>_r<r>').
 'neuron_engrank' noises round(--noise_frac x all) neurons: of those with P_kor >= --p_kor_min and P_kor > P_eng, the
 ones with the lowest P_eng (ties by index; '-nt_engrank_q<q>_f<f>').
+--repair_scope reset_only (targeted noise only): the repair changes only the noised neurons (their gate/up_proj rows
+and down_proj columns); every other parameter stays bit-identical to its post-noise value. '-rs_reset' name suffix.
 --dry_select: only that selection (single-experiment flags; no training, nothing written), printing its size.
 
 GPUs: the paper ran every language UNDO run on 4 H200s (arXiv 2506.06278, App. E): per-process batch 4 x 60
@@ -47,7 +49,7 @@ Launch Command (Sweep):      python run_partial_distill_language.py --run_all --
 from src.tools.partial_distill_langarith import load_tokenizer, load_train_dataset, partial_distill, select_mlp_neurons
 from src.utils.paths import CACHE_DIR, DATASET_DIR, MODEL_DIR, USE_WANDB, WANDB_API_KEY
 from src.utils.run_names import (
-    ARMS, EPOCHS, KOR_TARGETS, NOISE_TARGETS, SALIENCY_SEQS, STOP_MODES, STOP_RULES, SWEEP_ALPHAS, SWEEP_BETAS, SWEEP_SEEDS, FIXED_STEPS, TEACHER_LR,
+    ARMS, EPOCHS, KOR_TARGETS, NOISE_TARGETS, REPAIR_SCOPES, SALIENCY_SEQS, STOP_MODES, STOP_RULES, SWEEP_ALPHAS, SWEEP_BETAS, SWEEP_SEEDS, FIXED_STEPS, TEACHER_LR,
     noise_suffix, partial_distill_name, reference_models, warmup_optimizer_steps,
 )
 from accelerate import Accelerator
@@ -193,7 +195,7 @@ def never_stop_cond_fn(student_eval_dict, teacher_eval_dict):
 def run_experiment(setup_id, alpha, beta, seed=None, arm='A', kor_targets='uniform', stop_mode='fixed_steps',
                    fixed_steps=FIXED_STEPS, max_steps=None, teacher_lr=TEACHER_LR, epochs=EPOCHS, stop_rule='pooled',
                    warmup_frac=None, noise_target='all', noise_frac=None, saliency_seqs=SALIENCY_SEQS,
-                   noise_count=None, p_kor_min=None, p_eng_max=None):
+                   noise_count=None, p_kor_min=None, p_eng_max=None, repair_scope='all'):
     """Run a single experiment. max_steps caps early-stop runs (default: none, as upstream)."""
     current_setup = setups[setup_id].copy()
     arm_config = ARM_CONFIGS[arm]
@@ -204,7 +206,7 @@ def run_experiment(setup_id, alpha, beta, seed=None, arm='A', kor_targets='unifo
 
     model_name = partial_distill_name(arm, alpha, beta, current_setup['seed'], stop_mode, fixed_steps, kor_targets,
                                       teacher_lr, epochs, stop_rule, warmup_frac, noise_target, noise_frac,
-                                      saliency_seqs, noise_count, p_kor_min, p_eng_max)
+                                      saliency_seqs, noise_count, p_kor_min, p_eng_max, repair_scope)
     current_setup['output_dir'] = current_setup['output_dir'].replace('model_name', model_name)
     current_setup['path_local_record'] = current_setup['path_local_record'].replace('model_name', model_name)
     current_setup['teacher_model_name'] = model_path('unlearn', teacher_lr)
@@ -310,6 +312,7 @@ def run_experiment(setup_id, alpha, beta, seed=None, arm='A', kor_targets='unifo
         noise_count=noise_count,
         p_kor_min=p_kor_min,
         p_eng_max=p_eng_max,
+        repair_scope=repair_scope,
         saliency_seqs=saliency_seqs,
         # Forget, retain: train files (valid_kor is the relearn attack's eval set), loaded here for every arm.
         saliency_files=(KOR_TRAIN_FILE, ENG_TRAIN_FILE),
@@ -349,7 +352,7 @@ def warm_cache(args):
 
 def experiment_cli_args(experiment):
     (setup_id, alpha, beta, seed, arm, kor_targets, stop_mode, fixed_steps, max_steps, teacher_lr, epochs, stop_rule,
-     warmup_frac, noise_target, noise_frac, saliency_seqs, noise_count, p_kor_min, p_eng_max) = experiment
+     warmup_frac, noise_target, noise_frac, saliency_seqs, noise_count, p_kor_min, p_eng_max, repair_scope) = experiment
     cmd = ["--setup", setup_id, "--alpha", str(alpha), "--beta", str(beta), "--seed", str(seed), "--arm", arm,
            "--kor_targets", kor_targets, "--stop_mode", stop_mode, "--fixed_steps", str(fixed_steps),
            "--teacher_lr", str(teacher_lr), "--epochs", str(epochs), "--stop_rule", stop_rule]
@@ -363,6 +366,8 @@ def experiment_cli_args(experiment):
                             ("--p_kor_min", p_kor_min), ("--p_eng_max", p_eng_max)):
             if value is not None:
                 cmd.extend([flag, str(value)])
+    if repair_scope != 'all':
+        cmd.extend(["--repair_scope", repair_scope])
     return cmd
 
 def launch_single_experiment(experiment):
@@ -433,7 +438,8 @@ def run_all_experiments(args):
     alphas = [a for a in args.alphas if args.start_alpha is None or a >= args.start_alpha]
     experiments = [(setup_id, alpha, beta, seed, arm, args.kor_targets, args.stop_mode, args.fixed_steps, args.max_steps,
                     args.teacher_lr, args.epochs, args.stop_rule, args.warmup_frac, args.noise_target,
-                    args.noise_frac, args.saliency_seqs, args.noise_count, args.p_kor_min, args.p_eng_max)
+                    args.noise_frac, args.saliency_seqs, args.noise_count, args.p_kor_min, args.p_eng_max,
+                    args.repair_scope)
                    for setup_id in SETUPS_TO_RUN
                    for arm in args.arms
                    for alpha in alphas
@@ -515,6 +521,10 @@ if __name__ == "__main__":
     parser.add_argument('--saliency_seqs', type=int, default=SALIENCY_SEQS,
                         help='neuron_act / neuron_rule / neuron_engrank: Korean and English train sequences each to score neurons on '
                              "(default 64; other values add '_s<n>' to the name)")
+    parser.add_argument('--repair_scope', choices=REPAIR_SCOPES, default='all',
+                        help="'all' (default): the repair retrains every parameter. 'reset_only' (targeted noise "
+                             "only): only the noised neurons' gate/up_proj rows and down_proj columns change; adds "
+                             "'-rs_reset' to the run name")
     parser.add_argument('--dry_select', action='store_true',
                         help='Only compute and print the targeted-noise selection of the single-experiment flags '
                              '(--arm, --seed, --noise_*), then exit: no training, nothing written')
@@ -540,7 +550,7 @@ if __name__ == "__main__":
         parser.error("--warmup_frac applies only to --stop_mode fixed_steps")
     try:   # the name's rules: --noise_frac (act; rand), --noise_count (rand), --p_kor_min/--p_eng_max (rule), else none
         noise_suffix(args.noise_target, args.noise_frac, args.saliency_seqs, args.noise_count, args.p_kor_min,
-                     args.p_eng_max)
+                     args.p_eng_max, args.repair_scope)
     except ValueError as e:
         parser.error(f"targeted noise flags: {e}")
 
@@ -560,7 +570,7 @@ if __name__ == "__main__":
         run_experiment(args.setup, args.alpha, args.beta, args.seed, args.arm, args.kor_targets,
                        args.stop_mode, args.fixed_steps, args.max_steps, args.teacher_lr, args.epochs, args.stop_rule,
                        args.warmup_frac, args.noise_target, args.noise_frac, args.saliency_seqs, args.noise_count,
-                       args.p_kor_min, args.p_eng_max)
+                       args.p_kor_min, args.p_eng_max, args.repair_scope)
 
     # If run_all flag is set, run all experiments
     elif args.run_all or args.start_alpha is not None:

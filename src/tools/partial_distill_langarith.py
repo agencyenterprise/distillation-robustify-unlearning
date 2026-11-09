@@ -104,6 +104,7 @@ def partial_distill(
     noise_count=None,
     p_kor_min=None,
     p_eng_max=None,
+    repair_scope="all",
 ):
     """
     Distillation script using Accelerate. Replaces standard CE with forward KL (KL(teacher||student)).
@@ -140,6 +141,9 @@ def partial_distill(
                                 and <= p_eng_max on the retain train sequences (select_mlp_neurons).
       saliency_seqs, saliency_files  neuron_act / neuron_rule: score on this many sequences each of (forget, retain)
                                 train files.
+      repair_scope              "all" (default): the repair retrains every parameter. "reset_only" (targeted noise
+                                only): only the noised neurons' gate/up_proj rows and down_proj columns change;
+                                every other entry stays bit-identical to its post-noise value (ResetOnlyRepair).
       noise_record_paths        targeted modes: where to write the selection JSON (noise_selection_record).
     """
     assert loss_type in ("kl", "ce"), loss_type
@@ -233,6 +237,16 @@ def partial_distill(
         print_acc(f"[serum_original.py] Applying one-time shrink+perturb: noise={noise_alpha}", print_message)
         do_corruption(student_model, noise_alpha, noise_beta, neuron_masks=neuron_masks)
 
+    # Selective repair (AGI-2635): freeze everything but the noised neurons, before the optimizer and the DDP wrap.
+    assert repair_scope in ("all", "reset_only"), repair_scope
+    reset_only = None
+    if repair_scope == "reset_only":
+        assert neuron_masks is not None, "repair_scope 'reset_only' needs a targeted noise_target"
+        assert not shrink_perturb_repeat, "repair_scope 'reset_only' does not support shrink_perturb_repeat"
+        reset_only = ResetOnlyRepair(student_model, neuron_masks)
+        print_acc(f"[serum_original.py] Repair scope reset_only: {reset_only.n_trainable} trainable entries "
+                  f"(of {reset_only.n_total} parameters) in {len(reset_only.entries)} MLP matrices", print_message)
+
 
 
     # ----------------------------------------------------------------
@@ -283,7 +297,8 @@ def partial_distill(
     # Optimizer + Scheduler
     # ------------------------------------------------------------
     print_acc(f"[serum_original.py] Using AdamW, LR={learning_rate}, weight_decay={weight_decay}", print_message)
-    optimizer = torch.optim.AdamW(student_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    optimizer = torch.optim.AdamW([p for p in student_model.parameters() if p.requires_grad] if reset_only else
+                                  student_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer, lr_lambda(scheduler_type, num_warmup_steps, total_steps, learning_rate, min_lr))
@@ -394,6 +409,8 @@ def partial_distill(
             if (step_in_epoch + 1) % gradient_accumulation_steps == 0:
                 accelerator.clip_grad_norm_(student_model.parameters(), gradient_clipping_threshold)
                 optimizer.step()
+                if reset_only is not None:
+                    reset_only.restore()   # undo AdamW's weight decay on the frozen entries
                 scheduler.step()
                 optimizer.zero_grad()
                 global_step += 1
@@ -486,6 +503,8 @@ def partial_distill(
             f.write(json.dumps(final_val_dict) + "\n")
             
     # Final model saving at the end of all epochs
+    if reset_only is not None:
+        reset_only.check()   # every frozen MLP entry still bit-identical to its post-noise value (on every rank)
     if accelerator.is_main_process:
         final_model_path = os.path.join(output_dir, "final_model")
         unwrapped_student = accelerator.unwrap_model(student_model)
@@ -541,6 +560,54 @@ def mlp_modules(model):
     """The (gate_proj, up_proj, down_proj) of each decoder layer of a Gemma(2)/Llama-style causal LM."""
     model = getattr(model, "module", model)
     return [(layer.mlp.gate_proj, layer.mlp.up_proj, layer.mlp.down_proj) for layer in model.model.layers]
+
+
+class ResetOnlyRepair:
+    """--repair_scope reset_only (AGI-2635): after the targeted noise, let the repair change only the noised neurons
+    (rows of gate_proj/up_proj.weight, columns of down_proj.weight where neuron_masks is True). Build it on the
+    unwrapped, noised student, before the optimizer and accelerator.prepare:
+      1. every other parameter (embeddings, attention, norms, MLPs of layers with no selected neuron) gets
+         requires_grad=False, so it has no grad, is not in DDP's buckets, the optimizer (built from the trainable
+         parameters only) or the clip norm, and cannot change;
+      2. a gradient hook on each trainable MLP weight zeroes the non-selected rows/columns (tensor hooks run before
+         the gradient is accumulated, so before DDP's all-reduce; the all-reduced grad is zero there on every rank);
+      3. restore(), called after every optimizer.step(), copies the post-noise values back into the non-selected
+         entries, undoing AdamW's decoupled weight decay (the only thing that moves an entry with zero grad).
+    The post-noise copy lives on each parameter's device; every rank holds the same noised student, so it is the
+    same on every rank."""
+
+    def __init__(self, model, neuron_masks):
+        self.entries = []   # (param, keep mask broadcastable to it, post-noise copy)
+        mlp = {}
+        for i, (gate, up, down) in enumerate(mlp_modules(model)):
+            sel = neuron_masks[i]
+            if not bool(sel.any()):
+                continue
+            mlp[id(gate.weight)] = (gate.weight, sel[:, None])
+            mlp[id(up.weight)] = (up.weight, sel[:, None])
+            mlp[id(down.weight)] = (down.weight, sel[None, :])
+        self.n_total = sum(p.numel() for p in model.parameters())
+        self.n_trainable = 0
+        for param in model.parameters():
+            if id(param) not in mlp:
+                param.requires_grad_(False)
+                continue
+            _, sel = mlp[id(param)]
+            sel = sel.to(param.device)
+            grad_mask = sel.to(param.dtype)
+            param.register_hook(lambda g, m=grad_mask: g * m)
+            self.entries.append((param, sel, param.detach().clone()))
+            self.n_trainable += int(sel.expand_as(param).sum())
+
+    @torch.no_grad()
+    def restore(self):
+        for param, sel, ref in self.entries:
+            param.copy_(torch.where(sel, param, ref))
+
+    @torch.no_grad()
+    def check(self):
+        for param, sel, ref in self.entries:
+            assert torch.equal(torch.where(sel, ref, param), ref), "reset_only: a frozen MLP entry changed"
 
 
 @torch.no_grad()

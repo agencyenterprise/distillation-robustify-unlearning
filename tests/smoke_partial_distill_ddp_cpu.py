@@ -167,6 +167,47 @@ for kw in (dict(noise_target="neuron_act", noise_frac=0.05), dict(noise_target="
         print(f"[ddp smoke] arm F {name.rsplit('-', 1)[-1]} OK: k={k}, noised checksum {sums[0]:.6f} on all ranks",
               flush=True)
 
+# Selective repair (--repair_scope reset_only): after a real DDP repair with weight decay, every parameter outside the
+# noised neurons is bit-identical to its post-noise value, the noised neurons changed, and the trained student is the
+# same on every rank.
+reset_checks = []
+class CheckedResetOnlyRepair(tool.ResetOnlyRepair):
+    def __init__(self, model, neuron_masks):
+        super().__init__(model, neuron_masks)
+        self.model = model
+        self.post = {n: p.detach().clone() for n, p in model.named_parameters()}
+        self.selected = {id(p): sel.expand_as(p) for p, sel, _ in self.entries}
+
+    def check(self):
+        super().check()
+        changed = 0
+        for n, p in self.model.named_parameters():
+            sel = self.selected.get(id(p))
+            if sel is None:
+                assert torch.equal(p, self.post[n]), f"reset_only: frozen {n} changed"
+            else:
+                assert torch.equal(p[~sel], self.post[n][~sel]), f"reset_only: unselected entries of {n} changed"
+                changed += int((p[sel] != self.post[n][sel]).sum())
+        reset_checks.append((self.n_trainable, changed, sum(p.double().sum().item() for p in self.model.parameters())))
+tool.ResetOnlyRepair = CheckedResetOnlyRepair
+pd.setups["gemma-2-0.1B_MaxEnt"]["weight_decay"] = 0.1   # the setup has 0; > 0 exercises restore()
+for kw in (dict(noise_target="neuron_act", noise_frac=0.05), dict(noise_target="neuron_rand", noise_frac=0.2)):
+    pd.run_experiment("gemma-2-0.1B_MaxEnt", 1.0, 1.0, 111, "F", "uniform", "fixed_steps", fixed_steps=4,
+                      warmup_frac=0.25, saliency_seqs=4, repair_scope="reset_only", **kw)
+    state.wait_for_everyone()
+    got = [None] * NPROC
+    dist.all_gather_object(got, reset_checks[-1])
+    assert len(set(got)) == 1, f"{kw}: reset_only repair differs across ranks: {got}"
+    n_trainable, changed, checksum = got[0]
+    assert changed > 0.5 * n_trainable > 0, got[0]
+    if state.is_main_process:
+        name = partial_distill_name("F", 1.0, 1.0, 111, "fixed_steps", 4, warmup_frac=0.25, saliency_seqs=4,
+                                    repair_scope="reset_only", **kw)
+        assert name.endswith("-rs_reset") and os.path.exists(f"{MODEL_DIR}/{name}/final_model/config.json"), name
+        print(f"[ddp smoke] arm F {name.rsplit('-', 2)[-2]} reset_only OK: {changed} of {n_trainable} trainable "
+              f"entries changed, everything else bit-identical, checksum {checksum:.6f} on all ranks", flush=True)
+tool.ResetOnlyRepair = CheckedResetOnlyRepair.__mro__[1]
+
 # A rerun is skipped on every rank (no hang, no new noising).
 before = len(noised)
 pd.run_experiment("gemma-2-0.1B_MaxEnt", 0.3, 0.1, 111, "A", "uniform", "fixed_steps", fixed_steps=STEPS)

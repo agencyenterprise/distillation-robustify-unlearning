@@ -55,6 +55,10 @@ STOP_RULES = ['pooled', 'any_shard']
 # fraction with the lowest P_eng among P_kor >= q and P_kor > P_eng ('neuron_engrank').
 # Only the targeted modes add to the name, so 'all' names are unchanged.
 NOISE_TARGETS = ['all', 'neuron_act', 'neuron_rand', 'neuron_rule', 'neuron_engrank']
+# What the repair (retraining after the noise) may change (AGI-2635): 'all' (upstream: every parameter) or 'reset_only'
+# (only the noised neurons' gate/up_proj rows and down_proj columns; targeted noise only). Only 'reset_only' adds to
+# the name ('-rs_reset', after the noise suffix), so 'all' names are unchanged.
+REPAIR_SCOPES = ['all', 'reset_only']
 SALIENCY_SEQS = 64        # neuron_act / neuron_rule: Korean and English train sequences each used to score neurons
 
 SWEEP_ALPHAS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
@@ -90,14 +94,32 @@ def warmup_suffix(warmup_frac=None):
     return "" if warmup_frac is None else f"-warmup_frac_{fmt(warmup_frac)}"
 
 
+def repair_suffix(repair_scope='all', noise_target='all'):
+    """'' for 'all'; '-rs_reset' for 'reset_only' (needs a targeted noise_target)."""
+    if repair_scope not in REPAIR_SCOPES:
+        raise ValueError(f"unknown repair_scope {repair_scope!r}")
+    if repair_scope == 'all':
+        return ""
+    if noise_target == 'all':
+        raise ValueError("repair_scope 'reset_only' needs a targeted noise_target")
+    return "-rs_reset"
+
+
 def noise_suffix(noise_target='all', noise_frac=None, saliency_seqs=SALIENCY_SEQS, noise_count=None, p_kor_min=None,
-                 p_eng_max=None):
+                 p_eng_max=None, repair_scope='all'):
+    return (_noise_suffix(noise_target, noise_frac, saliency_seqs, noise_count, p_kor_min, p_eng_max)
+            + repair_suffix(repair_scope, noise_target))
+
+
+def _noise_suffix(noise_target='all', noise_frac=None, saliency_seqs=SALIENCY_SEQS, noise_count=None, p_kor_min=None,
+                  p_eng_max=None):
     """'' for 'all'. Targeted noise:
       neuron_act   '-nt_act_f<frac>'
       neuron_rand  '-nt_rand_f<frac>', or '-nt_rand_n<count>' with noise_count (exactly one of the two)
       neuron_rule  '-nt_rule_q<p_kor_min>_r<p_eng_max>'
       neuron_engrank  '-nt_engrank_q<p_kor_min>_f<frac>'
-    plus '_s<n>' when neuron_act / neuron_rule / neuron_engrank score neurons on a non-default number of sequences."""
+    plus '_s<n>' when neuron_act / neuron_rule / neuron_engrank score neurons on a non-default number of sequences.
+    noise_suffix appends repair_suffix ('-rs_reset' for repair_scope 'reset_only')."""
     if noise_target not in NOISE_TARGETS:
         raise ValueError(f"unknown noise_target {noise_target!r}")
     if noise_target == 'all':
@@ -148,7 +170,7 @@ def fmt(x):
 def partial_distill_name(arm, alpha, beta, seed, stop_mode='fixed_steps', fixed_steps=FIXED_STEPS, kor_targets='uniform',
                          teacher_lr=TEACHER_LR, epochs=EPOCHS, stop_rule='pooled', warmup_frac=None,
                          noise_target='all', noise_frac=None, saliency_seqs=SALIENCY_SEQS, noise_count=None,
-                         p_kor_min=None, p_eng_max=None):
+                         p_kor_min=None, p_eng_max=None, repair_scope='all'):
     if stop_rule != 'pooled' and stop_mode != 'early':
         raise ValueError(f"stop_rule {stop_rule!r} applies only to stop_mode 'early'")
     if warmup_frac is not None and stop_mode != 'fixed_steps':
@@ -157,7 +179,7 @@ def partial_distill_name(arm, alpha, beta, seed, stop_mode='fixed_steps', fixed_
             f"-arm_{arm_label(arm, kor_targets)}"
             f"-alpha_{fmt(alpha)}-beta_{fmt(beta)}-seed_{seed}-{stop_label(stop_mode, fixed_steps, epochs)}"
             f"{stop_rule_suffix(stop_rule)}{warmup_suffix(warmup_frac)}"
-            f"{noise_suffix(noise_target, noise_frac, saliency_seqs, noise_count, p_kor_min, p_eng_max)}")
+            f"{noise_suffix(noise_target, noise_frac, saliency_seqs, noise_count, p_kor_min, p_eng_max, repair_scope)}")
 
 
 def relearn_record_dir(model):

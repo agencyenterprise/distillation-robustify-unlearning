@@ -12,11 +12,14 @@
 #   3. sync this point's records and this job's log to s3://ae-gr/agi-2635/v<V>/ and verify count + bytes
 # Unlike point.sbatch, every stop flag is passed once and explicitly (no '--stop_mode early ... --stop_mode
 # fixed_steps' override, and no reliance on argparse prefix-matching --stop_mode to the relearn's --stop_modes).
-# Arguments: arm alpha beta fixed_steps warmup_frac|none noise_target [noise_spec] [seed=N] [seqs=N]. Pass --time; submit
+# Arguments: arm alpha beta fixed_steps warmup_frac|none noise_target [noise_spec] [seed=N] [seqs=N] [repair=reset_only].
+# Pass --time; submit
 # from the repo root. noise_spec by noise_target: all: none; neuron_act: the fraction; neuron_rand: the fraction, or
 # n<N> for exactly N neurons (--noise_count); neuron_rule: q<q>_r<r> (--p_kor_min q --p_eng_max r); neuron_engrank:
 # q<q>_f<f> (--p_kor_min q --noise_frac f). seed=N (default 111, the runs' seed) goes to both stages as --seeds N; seqs=N
-# as --saliency_seqs N (neuron_act / neuron_rule / neuron_engrank; default 64; other values add '_s<N>' to the name). E.g. the 2% budget, 5% of neurons by activation saliency:
+# as --saliency_seqs N (neuron_act / neuron_rule / neuron_engrank; default 64; other values add '_s<N>' to the name);
+# repair=reset_only (targeted noise only) as --repair_scope reset_only to both stages: the repair changes only the
+# noised neurons ('-rs_reset' name suffix). E.g. the 2% budget, 5% of neurons by activation saliency:
 #   sbatch --time=01:30:00 -J agi2635-fx16-act0.05 cluster/agi2635/fixed_point.sbatch F 1.0 1.0 16 0.1 neuron_act 0.05
 # the firing-probability rule and its size-matched random control, seed 112:
 #   sbatch --time=02:00:00 cluster/agi2635/fixed_point.sbatch F 1.0 1.0 81 none neuron_rule q0.2_r0.02 seqs=256 seed=112
@@ -29,11 +32,12 @@ export AGI2569_V=${AGI2569_V:-4} PRECISION=${PRECISION:-fp32} MATMUL_PRECISION=$
 source cluster/agi2569/env.sh
 arm=$1 alpha=$2 beta=$3 steps=$4 wf=$5 nt=$6
 shift 6
-spec="" seed=111 seqs=""
+spec="" seed=111 seqs="" repair=all
 for a in "$@"; do
     case $a in
         seed=*) seed=${a#seed=} ;;
         seqs=*) seqs=${a#seqs=} ;;
+        repair=*) repair=${a#repair=} ;;
         *) [ -z "$spec" ] || { echo "[agi2635] unexpected argument $a" >&2; exit 2; }; spec=$a ;;
     esac
 done
@@ -55,13 +59,14 @@ common=(--arms "$arm" --alphas "$alpha" --betas "$beta" --seeds "$seed" --kor_ta
 [ -z "$q" ] || common+=(--p_kor_min "$q")
 [ -z "$r" ] || common+=(--p_eng_max "$r")
 [ -z "$seqs" ] || common+=(--saliency_seqs "$seqs")
+[ "$repair" = all ] || common+=(--repair_scope "$repair")
 
 NAME=$($PY -c "import sys; from src.utils.run_names import SALIENCY_SEQS, partial_distill_name as n
 a = sys.argv[1:]; f = lambda x, t=float: t(x) if x else None
 print(n(a[0], float(a[1]), float(a[2]), int(a[7]), 'fixed_steps', int(a[3]), 'uniform', warmup_frac=f(a[4]) if a[4] != 'none'
   else None, noise_target=a[5], noise_frac=f(a[6]), saliency_seqs=f(a[8], int) or SALIENCY_SEQS, noise_count=f(a[9], int),
-  p_kor_min=f(a[10]), p_eng_max=f(a[11])))" \
-  "$arm" "$alpha" "$beta" "$steps" "$wf" "$nt" "$nf" "$seed" "$seqs" "$nc" "$q" "$r")
+  p_kor_min=f(a[10]), p_eng_max=f(a[11]), repair_scope=a[12]))" \
+  "$arm" "$alpha" "$beta" "$steps" "$wf" "$nt" "$nf" "$seed" "$seqs" "$nc" "$q" "$r" "$repair") || exit 2
 NAME=${NAME#partial_distill_models/}
 echo "[agi2635] model $NAME"
 

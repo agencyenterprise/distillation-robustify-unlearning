@@ -12,7 +12,8 @@ from transformers import Gemma2Config, Gemma2ForCausalLM, PreTrainedTokenizerFas
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "src"))
-from src.tools.partial_distill_langarith import do_corruption, mlp_modules, neuron_stats, select_mlp_neurons  # noqa: E402
+from src.tools.partial_distill_langarith import (  # noqa: E402
+    ResetOnlyRepair, do_corruption, mlp_modules, neuron_stats, select_mlp_neurons)
 from src.utils.run_names import partial_distill_name, relearn_record_dir  # noqa: E402
 sys.path.insert(0, os.path.join(ROOT, "analysis", "agi2569"))
 import aggregate  # noqa: E402
@@ -267,3 +268,97 @@ def test_names_round_trip_engrank():
                dict(p_kor_min=0.2, noise_frac=0.005, noise_count=9), dict(p_kor_min=1.5, noise_frac=0.005)):
         with pytest.raises(ValueError):
             partial_distill_name("F", 1.0, 1.0, 111, "fixed_steps", 81, noise_target="neuron_engrank", **kw)
+
+
+def repair_steps(model, steps=4, weight_decay=0.1, scope="reset_only", masks=None):
+    """A few AdamW steps of partial_distill's update (CE, clip, step, restore) on random tokens."""
+    repair = ResetOnlyRepair(model, masks) if scope == "reset_only" else None
+    params = [p for p in model.parameters() if p.requires_grad] if repair else model.parameters()
+    opt = torch.optim.AdamW(params, lr=1e-2, weight_decay=weight_decay)
+    g = torch.Generator().manual_seed(3)
+    for _ in range(steps):
+        ids = torch.randint(1, 100, (4, SEQ), generator=g)
+        model(input_ids=ids, labels=ids).loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        opt.step()
+        if repair:
+            repair.restore()
+        opt.zero_grad()
+    return repair
+
+
+@pytest.mark.parametrize("target", ["neuron_act", "neuron_rand"])
+def test_reset_only_repair(target):
+    m = tiny_model()
+    masks, _ = select(m, target)
+    masks[1][:] = False   # a layer with no selected neuron: its MLP stays frozen too
+    torch.manual_seed(5)
+    do_corruption(m, 1.0, 1.0, neuron_masks=masks)
+    post = {n: p.detach().clone() for n, p in m.named_parameters()}
+    repair = repair_steps(m, masks=masks)
+    repair.check()
+    n_sel = sum(int(s.sum()) for s in masks)
+    assert repair.n_trainable == 3 * HIDDEN * n_sel
+    mlp = {}
+    for i, (gate, up, down) in enumerate(mlp_modules(m)):
+        for name, w, dim in (("gate", gate.weight, 0), ("up", up.weight, 0), ("down", down.weight, 1)):
+            mlp[id(w)] = (masks[i][:, None] if dim == 0 else masks[i][None, :]).expand_as(w)
+    changed_sel = 0
+    for n, p in m.named_parameters():
+        if id(p) not in mlp:
+            assert torch.equal(p, post[n]), n
+            continue
+        sel = mlp[id(p)]
+        assert torch.equal(p[~sel], post[n][~sel]), n
+        changed_sel += int((p[sel] != post[n][sel]).sum())
+    assert changed_sel > 0.9 * repair.n_trainable, (changed_sel, repair.n_trainable)
+
+
+def test_repair_all_unchanged():
+    """scope 'all' trains every parameter as before (same optimizer, nothing frozen), and the name is unchanged."""
+    a, b = tiny_model(), tiny_model()
+    masks, _ = select(a, "neuron_act")
+    repair_steps(a, scope="all", masks=masks)
+    opt = torch.optim.AdamW(b.parameters(), lr=1e-2, weight_decay=0.1)   # the pre-AGI-2635-repair update
+    g = torch.Generator().manual_seed(3)
+    for _ in range(4):
+        ids = torch.randint(1, 100, (4, SEQ), generator=g)
+        b(input_ids=ids, labels=ids).loss.backward()
+        torch.nn.utils.clip_grad_norm_(b.parameters(), 1.0)
+        opt.step()
+        opt.zero_grad()
+    for (n, p), q in zip(a.named_parameters(), b.parameters()):
+        assert torch.equal(p, q), n
+    assert all(p.requires_grad for p in a.parameters())
+
+
+def test_names_round_trip_repair():
+    plain = partial_distill_name("F", 1.0, 1.0, 111, "fixed_steps", 16, warmup_frac=0.1)
+    act = partial_distill_name("F", 1.0, 1.0, 111, "fixed_steps", 16, warmup_frac=0.1, noise_target="neuron_act",
+                               noise_frac=0.02)
+    assert act == partial_distill_name("F", 1.0, 1.0, 111, "fixed_steps", 16, warmup_frac=0.1,
+                                       noise_target="neuron_act", noise_frac=0.02, repair_scope="all")
+    cases = [(act, "nt_act_f0.02", None)]
+    for kw, noise in ((dict(noise_target="neuron_act", noise_frac=0.02), "nt_act_f0.02"),
+                      (dict(noise_target="neuron_rand", noise_frac=0.2), "nt_rand_f0.2"),
+                      (dict(noise_target="neuron_rand", noise_count=9), "nt_rand_n9"),
+                      (dict(noise_target="neuron_rule", p_kor_min=0.2, p_eng_max=0.02, saliency_seqs=256),
+                       "nt_rule_q0.2_r0.02_s256"),
+                      (dict(noise_target="neuron_engrank", p_kor_min=0.2, noise_frac=0.005), "nt_engrank_q0.2_f0.005")):
+        name = partial_distill_name("F", 1.0, 1.0, 111, "fixed_steps", 16, warmup_frac=0.1, repair_scope="reset_only",
+                                    **kw)
+        assert name == partial_distill_name("F", 1.0, 1.0, 111, "fixed_steps", 16, warmup_frac=0.1, **kw) + "-rs_reset"
+        cases.append((name, noise + "-rs_reset", "-rs_reset"))
+    assert cases[1][0] == plain + "-nt_act_f0.02-rs_reset"
+    for name, noise, repair in cases:
+        meta = aggregate.describe_model(relearn_record_dir(name))
+        assert (meta["arm"], meta["seed"], meta["stop"], meta["warmup_frac"], meta["noise"]) == \
+            ("F", 111, "fixed_steps_16", 0.1, noise), meta
+        assert aggregate.PARTIAL_RE.search(relearn_record_dir(name))["repair"] == repair
+    m = aggregate.PARTIAL_RE.search(relearn_record_dir(cases[4][0]))
+    assert (m["p_kor_min"], m["p_eng_max"], m["saliency_seqs"]) == ("0.2", "0.02", "256")
+    with pytest.raises(ValueError):
+        partial_distill_name("F", 1.0, 1.0, 111, "fixed_steps", 16, repair_scope="reset_only")   # needs targeted noise
+    with pytest.raises(ValueError):
+        partial_distill_name("F", 1.0, 1.0, 111, "fixed_steps", 16, noise_target="neuron_act", noise_frac=0.02,
+                             repair_scope="bogus")

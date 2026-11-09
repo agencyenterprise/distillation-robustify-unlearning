@@ -60,7 +60,8 @@ PARTIAL_RE = re.compile(
     # ('-nt_act_f0.05'), neuron_rand by count ('-nt_rand_n9'), neuron_rule by thresholds ('-nt_rule_q0.2_r0.02'),
     # neuron_engrank by threshold and fraction ('-nt_engrank_q0.2_f0.005')
     r"(?:-nt_(?P<noise_target>act|rand|rule|engrank)_(?:f(?P<noise_frac>[\d.]+)|n(?P<noise_count>\d+)"
-    r"|q(?P<p_kor_min>[\d.e-]+)_(?:r(?P<p_eng_max>[\d.e-]+?)|f(?P<engrank_frac>[\d.]+)))(?:_s(?P<saliency_seqs>\d+))?)?$"
+    r"|q(?P<p_kor_min>[\d.e-]+)_(?:r(?P<p_eng_max>[\d.e-]+?)|f(?P<engrank_frac>[\d.]+)))(?:_s(?P<saliency_seqs>\d+))?"
+    r"(?P<repair>-rs_reset)?)?$"   # --repair_scope reset_only (targeted noise only; kept in the 'noise' column)
 )
 RECORD_RE = re.compile(r"^(?P<lr>[^_]+)(?:_eval_every_(?P<eval_every>\d+))?_only_forget_data\.txt$")
 ATTACK_LRS = (1e-3, 7e-4, 4e-4, 1e-4, 7e-5, 5e-5, 1e-5, 7e-6, 4e-6, 1e-6)  # run_relearn_language.py LRS_TO_RUN
@@ -88,7 +89,8 @@ def describe_model(record_dir, teacher_lr=TEACHER_LR):
             "stop": match["stop"] + (match["stop_rule"] or ""),
             # --warmup_frac runs: the fraction (stop stays 'fixed_steps_<n>'); None for the setup's fixed warmup
             "warmup_frac": None if match["warmup_frac"] is None else float(match["warmup_frac"]),
-            # --noise_target runs: the name's noise suffix without its dash ('nt_act_f0.05'); None for 'all'
+            # --noise_target runs: the name's noise suffix without its dash ('nt_act_f0.05', 'nt_act_f0.02-rs_reset' with
+            # --repair_scope reset_only); None for 'all'
             "noise": None if match["noise_target"] is None else record_dir[match.start("noise_target") - 3:]}
 
 
